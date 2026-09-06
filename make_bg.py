@@ -1,6 +1,7 @@
 """make_bg.py — 背景烘焙工具（壁纸 → 毛玻璃/暗黑背景 PNG）。
 
-- CLI：`python make_bg.py` 按默认窗口尺寸重新生成 assets/bg.png 与 assets/bg_exploit.png；
+- CLI：`python make_bg.py` 按默认窗口尺寸重新生成 assets/bg_midnight.png / bg_paper.png /
+  bg_glass.png 与 assets/bg_exploit.png；
 - app.py 在窗口缩放时会实时调用 bake_glass()/bake_dark() 重烘焙（防抖后触发），
   因此「任意拖动缩放」需要 Pillow；未安装时 app 回退为固定尺寸 + 预生成背景。
 """
@@ -8,21 +9,29 @@
 import io
 import os
 
-from PIL import Image, ImageDraw, ImageFilter, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 
-# —— 主界面玻璃参数 ——
-BLUR = 5            # 毛玻璃模糊半径（低值 = 壁纸图案透出更清晰）
-GLASS_WHITE = 0.12  # 玻璃白色叠加强度（越低越透明）
-RADIUS = 24          # 面板圆角
-SCRIM_TOP = 150      # 顶部暗色渐变高度（保证白色标题可读）
-SCRIM_BOTTOM = 120   # 底部暗色渐变高度（保证状态行可读）
-SCRIM_ALPHA = 110    # 渐变最深处透明度（0-255）
-
-# —— 加班暗黑参数 ——
-DARK_BLUR = 10       # 暗黑模式模糊半径
-DARK_ALPHA = 0.58    # 暗黑模式整体压暗强度（0-1）
+# —— 三主题材质参数（edge/hilite 为实色，α 已按面底换算）——
+THEME_BAKE = {
+    "midnight": {  # 壁纸压暗 + 渐晕 + 暗玻璃面板
+        "brightness": 0.5, "vignette_alpha": 110,
+        "panel_blur": 22, "tint": (15, 17, 22), "tint_alpha": 132,
+        "edge": (110, 115, 126), "hilite": (140, 146, 158),
+    },
+    "paper": {     # 壁纸强模糊白化 + 近实白卡片
+        "blur": 26, "wash": 0.78,
+        "tint": (255, 255, 255), "tint_alpha": 184,
+        "edge": (232, 232, 235), "shadow_alpha": 26,
+    },
+    "glass": {     # 壁纸原样 + 白玻璃面板 + 顶/底窄渐晕
+        "top_bottom_alpha": 70,
+        "panel_blur": 20, "tint": (255, 255, 255), "tint_alpha": 117,
+        "edge": (244, 244, 246), "hilite": (255, 255, 255),
+    },
+}
+RADIUS = 24
 
 
 def _png_bytes(img: Image.Image) -> bytes:
@@ -36,44 +45,82 @@ def _fit(src: str, size: tuple[int, int]) -> Image.Image:
     return ImageOps.fit(Image.open(src).convert("RGB"), size)
 
 
-def _add_scrims(img: Image.Image) -> None:
-    """图顶/底叠加黑色→透明渐变，让浮在照片区的白字/状态字可读。"""
+def _radial_vignette(img: Image.Image, alpha: int) -> None:
+    """大半径径向渐晕（1/8 分辨率计算后双线性放大，消除色带）。中心 55% 不压。"""
     w, h = img.size
+    W, H = max(1, w // 8), max(1, h // 8)
+    m = Image.new("L", (W, H), 0)
+    px = m.load()
+    cx, cy = (W - 1) / 2, (H - 1) / 2
+    maxd = (cx * cx + cy * cy) ** 0.5
+    for y in range(H):
+        for x in range(W):
+            d = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5 / maxd
+            t = max(0.0, (d - 0.55) / 0.45)
+            px[x, y] = int(alpha * t * t)
+    img.paste(Image.new("RGB", (w, h), (6, 8, 12)), (0, 0),
+              m.resize((w, h), Image.BILINEAR))
+
+
+def _band_scrims(img: Image.Image, alpha: int) -> None:
+    """glass 用顶/底窄渐晕（标题与状态行可读），高度 12%。"""
+    w, h = img.size
+    band = max(8, int(h * 0.12))
     overlay = Image.new("L", (1, h), 0)
     px = overlay.load()
-    for y in range(min(SCRIM_TOP, h)):
-        px[0, y] = int(SCRIM_ALPHA * (1 - y / SCRIM_TOP))
-    for y in range(min(SCRIM_BOTTOM, h)):
-        px[0, h - 1 - y] = int(SCRIM_ALPHA * (1 - y / SCRIM_BOTTOM))
-    overlay = overlay.resize((w, h))
-    img.paste(Image.new("RGB", (w, h), (0, 0, 0)), (0, 0), overlay)
+    for y in range(min(band, h)):
+        px[0, y] = int(alpha * (1 - y / band))
+        px[0, h - 1 - y] = int(alpha * (1 - y / band))
+    img.paste(Image.new("RGB", (w, h), (0, 0, 0)), (0, 0),
+              overlay.resize((w, h)))
+
+
+def _paste_panel(base: Image.Image, glass: Image.Image, box, p: dict) -> None:
+    mask = Image.new("L", base.size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle(box, radius=RADIUS, fill=255)
+    if "shadow_alpha" in p:  # paper：面板下柔和投影
+        sh = Image.new("L", base.size, 0)
+        ImageDraw.Draw(sh).rounded_rectangle(
+            (box[0], box[1] + 6, box[2], box[3] + 6), radius=RADIUS, fill=p["shadow_alpha"])
+        sh = sh.filter(ImageFilter.GaussianBlur(12))
+        base.paste(Image.new("RGB", base.size, (20, 24, 34)), (0, 0), sh)
+    base.paste(glass, (0, 0), mask)
+    d = ImageDraw.Draw(base)
+    d.rounded_rectangle(box, radius=RADIUS, outline=p["edge"], width=1)
+    if "hilite" in p:  # 上缘内高光（x 两端内收 RADIUS，y = 面板顶 +2）
+        d.line((box[0] + RADIUS, box[1] + 2, box[2] - RADIUS, box[1] + 2),
+               fill=p["hilite"], width=1)
 
 
 def bake_glass(src: str, size: tuple[int, int],
-               panels: list[tuple[int, int, int, int]]) -> bytes:
-    """主界面背景：壁纸 + 顶底渐变 + 毛玻璃面板（模糊 + 白色叠加 + 高光描边）。"""
+               panels: list[tuple[int, int, int, int]],
+               theme: str = "glass") -> bytes:
+    """主界面背景：按主题烘焙三套材质之一。"""
+    p = THEME_BAKE[theme]
     base = _fit(src, size)
-    _add_scrims(base)
-    glass = Image.blend(base.filter(ImageFilter.GaussianBlur(BLUR)),
-                        Image.new("RGB", base.size, (255, 255, 255)),
-                        GLASS_WHITE)
-    mask = Image.new("L", base.size, 0)
-    d = ImageDraw.Draw(mask)
+    if theme == "midnight":
+        base = ImageEnhance.Brightness(base).enhance(p["brightness"])
+        _radial_vignette(base, p["vignette_alpha"])
+        glass = base.filter(ImageFilter.GaussianBlur(p["panel_blur"]))
+    elif theme == "paper":
+        base = base.filter(ImageFilter.GaussianBlur(p["blur"]))
+        base = Image.blend(base, Image.new("RGB", size, (255, 255, 255)), p["wash"])
+        glass = base
+    else:  # glass
+        _band_scrims(base, p["top_bottom_alpha"])
+        glass = base.filter(ImageFilter.GaussianBlur(p["panel_blur"]))
+    glass = Image.blend(glass, Image.new("RGB", size, p["tint"]),
+                        p["tint_alpha"] / 255)
     for box in panels:
-        d.rounded_rectangle(box, radius=RADIUS, fill=255)
-    base.paste(glass, (0, 0), mask)
-    outline = ImageDraw.Draw(base)  # 玻璃边缘 1px 高光
-    for box in panels:
-        outline.rounded_rectangle(box, radius=RADIUS,
-                                  outline=(255, 255, 255), width=1)
+        _paste_panel(base, glass, box, p)
     return _png_bytes(base)
 
 
 def bake_dark(src: str, size: tuple[int, int]) -> bytes:
-    """加班暗黑背景：壁纸模糊 + 整体压暗（保持暗黑压榨氛围）。"""
-    base = _fit(src, size).filter(ImageFilter.GaussianBlur(DARK_BLUR))
-    return _png_bytes(Image.blend(base, Image.new("RGB", size, (0, 0, 0)),
-                                  DARK_ALPHA))
+    """加班暗黑背景：模糊压暗 + 8% 暗红（三主题通用）。"""
+    base = _fit(src, size).filter(ImageFilter.GaussianBlur(10))
+    base = Image.blend(base, Image.new("RGB", size, (0, 0, 0)), 0.58)
+    return _png_bytes(Image.blend(base, Image.new("RGB", size, (60, 0, 0)), 0.08))
 
 
 def main() -> None:
@@ -81,15 +128,24 @@ def main() -> None:
     size = (app.DEFAULT_WIN_W, app.DEFAULT_WIN_H)
     lay = app.compute_layout(*size)
     src_main = os.path.join(BASE, "assets", "wallpaper.jpg")
+    names = []
+    for theme in app.THEMES:
+        if theme not in THEME_BAKE:
+            continue  # 过渡期 app.THEMES 可能还是旧键（键迁移后不再发生）
+        out = os.path.join(BASE, "assets", f"bg_{theme}.png")
+        open(out, "wb").write(
+            bake_glass(src_main, size, [lay["main"], lay["stats"]], theme))
+        names.append(os.path.basename(out))
     src_exp = os.path.join(BASE, "assets", "wallpaper_exploit.jpg")
-    open(os.path.join(BASE, "assets", "bg.png"), "wb").write(
-        bake_glass(src_main, size, [lay["main"], lay["stats"]]))
     if os.path.exists(src_exp):
         open(os.path.join(BASE, "assets", "bg_exploit.png"), "wb").write(
             bake_dark(src_exp, size))
-        print(f"OK assets/bg.png + assets/bg_exploit.png {size}")
-    else:
-        print(f"OK assets/bg.png {size}（缺 assets/wallpaper_exploit.jpg，未生成暗黑背景）")
+        names.append("bg_exploit.png")
+    old = os.path.join(BASE, "assets", "bg.png")
+    if names and any(n.startswith("bg_") and n != "bg_exploit.png"
+                     for n in names) and os.path.exists(old):
+        os.remove(old)  # 只有生成过主题替代文件才退役旧背景
+    print(f"OK {', '.join(names)} {size}")
 
 
 if __name__ == "__main__":
