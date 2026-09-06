@@ -38,8 +38,7 @@ DEFAULT_CONFIG = {
     "work_start": "09:00",
     "work_end": "18:00",
     "holiday_mode": "weekend",  # weekend=固定周末公休 | free=自由假期
-    "monthly_holidays": 2,
-    "free_holidays": [],        # free 模式：当月已标记休息的 ISO 日期列表
+    "leaves": {},               # 当月休假标记：ISO 日期 → "调休"/"请假"（两模式通用）
     "payday": 15,
     "theme": "midnight",
     "last_asked_date": "",
@@ -181,10 +180,16 @@ def load_config(path: str | None = None) -> tuple[dict, str]:
                 loaded[key] = data[key]
         if loaded["holiday_mode"] not in ("weekend", "free"):
             raise ValueError("bad holiday_mode")
-        if not isinstance(loaded["free_holidays"], list):
-            raise ValueError("bad free_holidays")
+        loaded["leaves"] = {}
+        for d in (data.get("free_holidays") or []):  # 旧自由假日 → 调休
+            if isinstance(d, str):
+                loaded["leaves"][d] = "调休"
+        if isinstance(data.get("leaves"), dict):      # 新字段优先
+            loaded["leaves"].update(data["leaves"])
+        elif data.get("leaves") is not None:
+            raise ValueError("bad leaves")  # 非法类型 → 沿袭 R4 整表重置
         if money.validate(loaded["monthly_salary"], loaded["work_start"],
-                          loaded["work_end"], loaded["monthly_holidays"],
+                          loaded["work_end"], loaded["leaves"],
                           loaded["payday"], loaded["holiday_mode"]):
             raise ValueError("config fields failed money.validate")
         loaded["theme"] = str(loaded["theme"])  # 防不可哈希 JSON 值在下方查找中抛 TypeError
@@ -219,6 +224,7 @@ class PayClockApp:
         self.cfg, load_warning = load_config()
         self.configured = os.path.exists(config_path()) and not load_warning
         self.pss = 0.0                 # 当月秒薪（月度派生缓存）
+        self.daily = 0.0               # 当月日薪（月度派生缓存，请假显示用）
         self.overtime_start = None     # 加班激活时刻；None = 非加班
         self.cached_date = None        # tick 跨日/跨月检测缓存
         self.ask_dialog = None         # 「今天加班吗」非模态弹窗
@@ -278,14 +284,15 @@ class PayClockApp:
         self._theme_menu = m_theme
         self._menu_set = m_set
 
-        # 「标记今天休息」直接平移到顶栏，点击即切换（仅 free 模式可用）
-        menubar.add_command(label="标记今天休息",
-                            command=self._toggle_today_holiday)
-        self._holiday_idx = menubar.index("end")
+        # 「标记今天」子菜单（调休/请假/取消标记）由任务 3 接管；过渡期挂起旧入口
+        # （_toggle_today_holiday 已由 _mark_today/_unmark_today 取代，见本提交）
+        # menubar.add_command(label="标记今天休息",
+        #                     command=self._toggle_today_holiday)
+        # self._holiday_idx = menubar.index("end")
         self._menu_bar = menubar
         self.root.configure(menu=menubar)
         self._restyle_menu()
-        self._update_holiday_menu()
+        # self._update_holiday_menu()  # 任务 3 恢复为 _update_today_menu()
 
     def _update_holiday_menu(self) -> None:
         """free 模式才可用「标记今天休息」，并按当日标记状态切换文案。"""
@@ -323,25 +330,38 @@ class PayClockApp:
         except Exception:
             pass
 
-    def _toggle_today_holiday(self) -> None:
-        if self.cfg["holiday_mode"] != "free":
+    def _mark_today(self, leave_type: str) -> None:
+        """把今天标记为指定类型休假（weekend 模式周末本就休息，拒绝标记）。"""
+        today = datetime.now().date()
+        if self.cfg["holiday_mode"] == "weekend" and today.weekday() >= 5:
+            self._set_status("周末本就休息，无需标记")
             return
-        today_iso = datetime.now().date().isoformat()
-        holidays = list(self.cfg["free_holidays"])
-        if today_iso in holidays:
-            holidays.remove(today_iso)
-            self._set_status("已取消今天的休息标记")
-        else:
-            holidays.append(today_iso)
-            self._set_status("已标记今天休息（今日不计薪）")
-        candidate = {**self.cfg, "free_holidays": holidays}
+        candidate = {**self.cfg, "leaves": {**self.cfg.get("leaves", {}),
+                                           today.isoformat(): leave_type}}
         if not save_config(candidate):
             self._set_status("警告：config.json 写入失败")
             return
         self.cfg.update(candidate)
         self._refresh_month_cache(datetime.now())
-        self._update_holiday_menu()
+        self._update_today_menu()
         self._update_display(datetime.now())
+        self._set_status(f"已标记今天{leave_type}")
+
+    def _unmark_today(self) -> None:
+        """取消今天的休假标记（未标记时静默返回）。"""
+        key = datetime.now().date().isoformat()
+        if key not in self.cfg.get("leaves", {}):
+            return
+        candidate = {**self.cfg,
+                     "leaves": {k: v for k, v in self.cfg["leaves"].items() if k != key}}
+        if not save_config(candidate):
+            self._set_status("警告：config.json 写入失败")
+            return
+        self.cfg.update(candidate)
+        self._refresh_month_cache(datetime.now())
+        self._update_today_menu()
+        self._update_display(datetime.now())
+        self._set_status("已取消今天的休假标记")
 
     # ---------------- 界面构建（Canvas + 实时烘焙玻璃背景，可任意缩放）----------------
 
@@ -675,7 +695,7 @@ class PayClockApp:
         self.cfg.update(candidate)
         self.configured = True
         self._refresh_month_cache(datetime.now())
-        self._update_holiday_menu()
+        # self._update_holiday_menu()  # 任务 3 恢复为 _update_today_menu()
         self._set_status("已保存")
         self._update_display(datetime.now())
         dlg.destroy()
@@ -717,18 +737,21 @@ class PayClockApp:
     def _on_date_rollover(self, now: datetime) -> None:
         self.cached_date = now.date()
         self._refresh_month_cache(now)       # 跨月重算秒薪等月度派生值
-        self._update_holiday_menu()          # 跨日刷新「标记今天休息」文案
+        # self._update_holiday_menu()        # 任务 3 恢复为 _update_today_menu()
         self._close_ask_dialog()             # 重置当日询问内存态
 
     def _refresh_month_cache(self, now: datetime) -> None:
-        # free_holidays 只保留当月标记，跨月自动清零
-        prefix = f"{now.year:04d}-{now.month:02d}"
-        self.cfg["free_holidays"] = [d for d in self.cfg["free_holidays"]
-                                     if isinstance(d, str) and d.startswith(prefix)]
+        # leaves 只保留当月标记，跨月自动清零；秒薪/日薪整月按新口径重算
+        prefix = f"{now.year:04d}-{now.month:02d}-"
+        self.cfg["leaves"] = {k: v for k, v in self.cfg.get("leaves", {}).items()
+                              if isinstance(k, str) and k.startswith(prefix)}
+        mode = self.cfg["holiday_mode"]
         self.pss = money.per_second_salary(
-            self.cfg["monthly_salary"], now.year, now.month,
-            self.cfg["monthly_holidays"], self.cfg["work_start"], self.cfg["work_end"],
-            self.cfg["holiday_mode"])
+            self.cfg["monthly_salary"], now.year, now.month, self.cfg["leaves"],
+            self.cfg["work_start"], self.cfg["work_end"], mode)
+        self.daily = money.daily_salary(
+            self.cfg["monthly_salary"], now.year, now.month, self.cfg["leaves"],
+            self.cfg["work_start"], self.cfg["work_end"], mode)
 
     def _free_set(self) -> frozenset:
         return frozenset(self.cfg["free_holidays"])
