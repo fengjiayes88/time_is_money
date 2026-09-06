@@ -2,14 +2,16 @@
 
 - 视觉：壁纸背景 + 毛玻璃面板（苹果玻璃卡片质感）。窗口默认 348×452，可任意
   拖拽缩放：尺寸变化时即时重排文字/重设圆角区域，停稳后（150ms 防抖）用
-  Pillow 按新尺寸重烘焙背景；未安装 Pillow 时回退固定尺寸 + 预生成背景。
-  全部文字带 8 方向描边光晕，保证高透明玻璃下任意壁纸可读；
+  Pillow 按新尺寸重烘焙背景；未安装 Pillow 时回退固定尺寸 + 预生成背景
+  （assets/bg_<theme>.png）。
+  全部文字不带描边，可读性由烘焙层（渐晕/面板材质）保证；
 - 月薪为机密：设置弹窗中默认以 • 掩码显示，可勾选「显示」临时查看；
 - 上班开始/结束用 Spinbox 时间选择控件（只读+循环滚动），非手输框；
 - 休假两种模式：weekend=固定周末公休+每月额外假期；free=自由假期（当月任选 N 天，
   周末照常上班，通过顶部菜单「标记今天休息」逐日标记）；
 - 主界面聚焦实时收入：今日已赚超大字号居中；设置收进顶部菜单栏（苹果风）；
-- 主题仅决定强调色；加班期切暗黑壁纸（模糊压暗 + 红字）；单实例互斥体防多开。
+- 三套主题（midnight/paper/glass）共享一套冰蓝强调色 token 表；主数字等宽字体；
+  加班期切暗黑壁纸（模糊压暗 + 红字）；单实例互斥体防多开。
 
 约束沿袭：单窗口单线程，全部刷新由 root.after(1000) 单循环驱动（R1）；
 每 tick 用真实当前时刻重算（A10/R2）；tick 异常兜底（A11/R5）；公式一律调 money 纯函数；
@@ -23,6 +25,7 @@ import json
 import math
 import os
 import tkinter as tk
+import tkinter.font as tkfont
 import tkinter.messagebox
 import winsound
 from datetime import datetime
@@ -139,15 +142,18 @@ FONT_APP = ("Microsoft YaHei UI", 10)
 FONT_APP_SMALL = ("Microsoft YaHei UI", 9)
 
 
-def scale_fonts(w: int) -> dict:
-    """字号随窗口宽度缩放（上下限夹紧，保证极小/极大窗口下可读）。"""
+def scale_fonts(w: int, mono: str = "Consolas") -> dict:
+    """字号随窗口宽度缩放；数字用等宽字体（tabular，每秒跳动不抖宽）。"""
+    yahei = "Microsoft YaHei UI"
     return {
-        "app": FONT_APP,
-        "small": FONT_APP_SMALL,
-        "title": ("Microsoft YaHei UI", max(11, min(int(w * 0.036), 18)), "bold"),
-        "label": ("Microsoft YaHei UI", max(9, min(int(w * 0.03), 13))),
-        "value": ("Microsoft YaHei UI", max(10, min(int(w * 0.037), 15)), "bold"),
-        "huge": ("Microsoft YaHei UI", max(24, min(int(w * 0.105), 56)), "bold"),
+        "app": (yahei, 10),
+        "small": (yahei, 9),
+        "title": (yahei, max(11, min(int(w * 0.036), 18)), "bold"),
+        "label": (yahei, max(9, min(int(w * 0.03), 13))),
+        "sub": (yahei, max(10, min(int(w * 0.032), 14))),
+        "value": (mono, max(10, min(int(w * 0.037), 15)), "bold"),
+        "value_cjk": (yahei, max(10, min(int(w * 0.037), 15)), "bold"),
+        "huge": (mono, max(24, min(int(w * 0.135), 72)), "bold"),
     }
 
 
@@ -231,6 +237,10 @@ class PayClockApp:
         self._resize_after = None      # 缩放防抖定时器
         self._rgn_size = (0, 0)        # 已应用圆角区域对应的窗口尺寸
         self._can_resize_bg = False    # Pillow 可用时才开任意缩放（构建 UI 前探测）
+        # 等宽字体探测（Consolas → Cascadia Mono → Courier New，按系统可用性回退）
+        fams = set(tkfont.families(root))
+        self._mono = ("Consolas" if "Consolas" in fams
+                      else "Cascadia Mono" if "Cascadia Mono" in fams else "Courier New")
         self._build_menu()
         # 先探测 Pillow（决定可缩放/固定尺寸分支），再构建 UI，避免先绑回调后发现回退
         self._can_resize_bg = _pillow_available()
@@ -248,13 +258,15 @@ class PayClockApp:
 
     def _build_menu(self) -> None:
         menu_font = ("Microsoft YaHei UI", 10)
+        t = self._tokens()  # 菜单静态上色（主题切换时的换肤在 _restyle_menu，任务 4）
 
         def apple_menu(master):
-            """苹果风菜单：浅灰底、墨色文字、系统蓝高亮、去内边框。"""
-            return tk.Menu(master, tearoff=0, bg=DLG_BG, fg=INK, font=menu_font,
-                           activebackground=BLUE, activeforeground="#FFFFFF",
+            """苹果风菜单：token 取色、去内边框。"""
+            return tk.Menu(master, tearoff=0, bg=t["menu_bg"], fg=t["menu_fg"], font=menu_font,
+                           activebackground=t["menu_active_bg"],
+                           activeforeground=t["menu_active_fg"],
                            activeborderwidth=0, bd=0, relief="flat",
-                           disabledforeground=MENU_DISABLED)
+                           disabledforeground=t["menu_disabled"])
 
         menubar = apple_menu(self.root)
         m_set = apple_menu(menubar)
@@ -263,13 +275,14 @@ class PayClockApp:
 
         m_theme = apple_menu(menubar)
         self.theme_var = tk.StringVar(
-            value=self.cfg["theme"] if self.cfg["theme"] in THEMES else "mint")
-        for key in ("mint", "amber", "sky"):
+            value=self.cfg["theme"] if self.cfg["theme"] in THEMES else "midnight")
+        for key in THEMES:
             m_theme.add_radiobutton(label=THEMES[key]["label"], value=key,
                                     variable=self.theme_var,
                                     command=self._on_theme_change)
         menubar.add_cascade(label="主题", menu=m_theme)
         self._theme_menu = m_theme
+        self._menu_set = m_set
 
         # 「标记今天休息」直接平移到顶栏，点击即切换（仅 free 模式可用）
         menubar.add_command(label="标记今天休息",
@@ -351,11 +364,8 @@ class PayClockApp:
             self.canvas.bind("<Configure>", self._on_canvas_configure)
         else:
             self.root.resizable(False, False)  # 无 Pillow：回退固定尺寸 + 预生成背景
-            bg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                   "assets", "bg.png")
-            if os.path.exists(bg_path):
-                self._bg_photo = tk.PhotoImage(file=bg_path)
-                self._bg_size = (self._bg_photo.width(), self._bg_photo.height())
+            self._reload_fallback_bg()
+            if self._bg_photo is not None:
                 self._win_w, self._win_h = self._bg_size
                 self.root.geometry(f"{self._win_w}x{self._win_h}")  # 跟随预生成背景尺寸
 
@@ -371,17 +381,27 @@ class PayClockApp:
         try:
             import make_bg
             src = WALLPAPER_EXPLOIT if self.overtime_start is not None else WALLPAPER
+            lay = compute_layout(w, h)
             if self.overtime_start is not None:
                 data = make_bg.bake_dark(src, (w, h))
             else:
-                lay = compute_layout(w, h)
-                data = make_bg.bake_glass(src, (w, h), [lay["main"], lay["stats"]])
+                data = make_bg.bake_glass(src, (w, h), [lay["main"], lay["stats"]],
+                                          self.cfg["theme"] if self.cfg["theme"] in THEMES else "midnight")
             self._bg_photo = tk.PhotoImage(data=base64.b64encode(data))
             self._bg_size = (w, h)
         except Exception:
             return  # 烘焙失败保留旧背景，不影响功能
         self._rerender()
         self._update_display(datetime.now())
+
+    def _reload_fallback_bg(self) -> None:
+        """无 Pillow 回退：按主题重载预烘焙背景。"""
+        key = self.cfg["theme"] if self.cfg["theme"] in THEMES else "midnight"
+        bg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "assets", f"bg_{key}.png")
+        if os.path.exists(bg_path):
+            self._bg_photo = tk.PhotoImage(file=bg_path)
+            self._bg_size = (self._bg_photo.width(), self._bg_photo.height())
 
     def _on_canvas_configure(self, event) -> None:
         # ① 圆角区域必须随尺寸立即重设，否则最大化/拖拽后窗口被旧区域裁剪
@@ -404,9 +424,9 @@ class PayClockApp:
         self._resize_after = None
         self._rebake_background()
 
-    def _accent(self) -> str:
-        key = self.cfg["theme"] if self.cfg["theme"] in THEMES else "mint"
-        return THEMES[key]["accent"]
+    def _tokens(self) -> dict:
+        key = self.cfg["theme"] if self.cfg["theme"] in THEMES else "midnight"
+        return THEMES[key]
 
     def _rerender(self) -> None:
         """按当前状态（常规/加班）重建画布内容；主题切换后也走这里。"""
@@ -417,53 +437,33 @@ class PayClockApp:
 
     def _render_main(self) -> None:
         c = self.canvas
-        w, h = self._win_w, self._win_h
-        lay = compute_layout(w, h)
-        f = scale_fonts(w)
+        lay = compute_layout(self._win_w, self._win_h)
+        f = scale_fonts(self._win_w, self._mono)
+        t = self._tokens()
         c.delete("all")
-        c.configure(bg=DLG_BG)
+        c.configure(bg=t["dlg_bg"])
         if self._bg_photo is not None:
             c.create_image(0, 0, anchor="nw", image=self._bg_photo)
-        else:
-            # 缺背景资源时的兜底：素色面板视觉降级，功能不变
+        else:  # 缺背景资源：素色面板兜底
             for box in (lay["main"], lay["stats"]):
-                c.create_rectangle(*box, fill=GLASS_FALLBACK,
-                                   outline=GLASS_FALLBACK)
-        accent = self._accent()
-
-        def ht(key, pos, text, font, fill, halo="#FFFFFF", width=None):
-            """带白色描边光晕的文字（8 方向偏移描边）。
-
-            玻璃面板几乎全透明后文字直接叠在壁纸上，靠描边保证任何壁纸下的
-            可读性；描边与主文字共用同一 tag，itemconfigure(tag) 可一并更新。
-            width 用于长文案换行（状态行警告等）。
-            """
-            kw = {"width": width} if width else {}
-            for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1),
-                           (-1, -1), (1, -1), (-1, 1), (1, 1)):
-                c.create_text(pos[0] + dx, pos[1] + dy, text=text,
-                              font=font, fill=halo, tags=key, **kw)
-            c.create_text(*pos, text=text, font=font, fill=fill, tags=key, **kw)
-
-        # 标题：白字 + 深色描边（与正文白描边相反，适配亮色照片区）
-        ht("title", lay["title"], "时间就是金钱", f["title"],
-           "#FFFFFF", halo="#3A3A3C")
-        ht("today_label", lay["today_label"], "今日已赚（元）",
-           f["label"], LABEL_INK)
-        ht("today", lay["today"], "0.00", f["huge"], accent)
-        ht("sub", lay["sub"], "", f["label"], LABEL_INK)
-        for i, name in enumerate(("本月已赚", "距发薪", "秒薪")):
-            ht(f"sl{i}", (lay["stat_xs"][i], lay["stat_label_y"]), name,
-               f["small"], LABEL_INK)
-            ht(f"sv{i}", (lay["stat_xs"][i], lay["stat_value_y"]), "—",
-               f["value"], INK)
-        ht("status", lay["status"], "", f["small"], accent,
-           width=w - 2 * lay["margin"])  # 长警告换行，防溢出窗口
+                c.create_rectangle(*box, fill=t["fallback"], outline=t["fallback"])
+        c.create_text(lay["title"], text="时间就是金钱", font=f["title"], fill=t["title"])
+        c.create_text(lay["today_label"], text="今日已赚（元）",
+                      font=f["label"], fill=t["label_ink"])
+        c.create_text(lay["today"], text="0.00", font=f["huge"], fill=t["accent"])
+        c.create_text(lay["sub"], text="", font=f["sub"], fill=t["label_ink"])
+        for i, name in enumerate(("本月已赚（元）", "距发薪", "秒薪（元）")):
+            c.create_text((lay["stat_xs"][i], lay["stat_label_y"]), text=name,
+                          font=f["small"], fill=t["label_ink"])
+            c.create_text((lay["stat_xs"][i], lay["stat_value_y"]), text="—",
+                          font=f["value"] if i != 1 else f["value_cjk"], fill=t["ink"])
+        c.create_text(lay["status"], text="", font=f["small"], fill=t["accent"],
+                      width=self._win_w - 2 * lay["margin"])  # 长警告换行，防溢出窗口
 
     def _render_exploit(self) -> None:
         c = self.canvas
         w, h = self._win_w, self._win_h
-        f = scale_fonts(w)
+        f = scale_fonts(w, self._mono)
         c.delete("all")
         c.configure(bg=EXPLOIT_BG)
         if self._bg_photo is not None:  # 暗黑壁纸（Dreamy di TikTok）
@@ -659,8 +659,12 @@ class PayClockApp:
         if not save_config(self.cfg):  # 主题即时持久化
             self._set_status("警告：config.json 写入失败，主题未持久化")
         if self.overtime_start is None:
-            self._render_main()          # 主题 = 强调色，重绘画布即生效
-            self._update_display(datetime.now())
+            if self._can_resize_bg:
+                self._rebake_background()  # 材质随主题变，按主题重烘焙（内部含重绘+刷新）
+            else:
+                self._reload_fallback_bg()
+                self._render_main()
+                self._update_display(datetime.now())
 
     # ---------------- 每秒 tick ----------------
 
@@ -714,15 +718,15 @@ class PayClockApp:
             for k in ("sub", "sv0", "sv1", "sv2"):
                 ic(k, text="—" if k.startswith("sv") else "")
             return
-        ic("today", font=scale_fonts(self._win_w)["huge"])  # 从占位态恢复大字号
+        ic("today", font=scale_fonts(self._win_w, self._mono)["huge"])  # 从占位态恢复大字号
         ws, we = cfg["work_start"], cfg["work_end"]
         fset, mode = self._free_set(), cfg["holiday_mode"]
         ic("today",
            text=f"{money.earned_today(self.pss, now, ws, we, fset, mode):,.2f}")
         ic("sub", text=self._off_work_text(now, we))
         month_earned = money.earned_this_month(self.pss, now, ws, we, fset, mode)
-        ic("sv0", text=f"{month_earned:,.2f} 元")
-        ic("sv2", text=f"{self.pss:.4f} 元/秒")
+        ic("sv0", text=f"{month_earned:,.2f}")
+        ic("sv2", text=f"{self.pss:.4f}")
         days = money.days_until_payday(now.date(), cfg["payday"])
         ic("sv1", text="今天发薪" if days == 0 else f"{days} 天")
 
