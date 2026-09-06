@@ -627,9 +627,9 @@ class PayClockApp:
         """按草稿休假模式重建日历（weekend 禁用格随草稿模式变化）。"""
         for w in self._cal_holder.winfo_children():
             w.destroy()
-        self._cal_holder.grid_columnconfigure(6, weight=1)
+        # 内层 frame 必须显式 grid，否则整历不映射（0 尺寸不可见）
         self._build_calendar(self._cal_holder, self._leaves_draft,
-                             self._mode_var.get())
+                             self._mode_var.get()).grid(padx=2, pady=2)
 
     def _open_settings(self) -> None:
         dlg = self.settings_dialog
