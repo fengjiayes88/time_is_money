@@ -1,7 +1,7 @@
 """money.py — time_is_money 纯薪资/日期/时间逻辑模块（BATCH-001）。
 
 约束（见 pi-tasks/time-is-money/batches/BATCH-001.md 与 MASTER_PLAN §4 A1–A8）：
-- 仅标准库 datetime / calendar / math；零文件 IO、零全局可变状态、零 UI；
+- 仅标准库 datetime / calendar / math / re；零文件 IO、零全局可变状态、零 UI；
 - 不 import tkinter / winsound / threading / subprocess / os / json；
 - 所有 assert 自检位于 `if __name__ == "__main__":` 守卫内，
   `import money` 无任何副作用与输出。
@@ -289,11 +289,6 @@ def overtime_seconds(now: datetime, end_hm: str, overtime_start: datetime) -> in
 def exploited_amount(pss: float, now: datetime, end_hm: str, overtime_start: datetime) -> float:
     """老板压榨金额 = 秒薪 × 加班累计秒数。"""
     return pss * overtime_seconds(now, end_hm, overtime_start)
-
-
-# ---------------------------------------------------------------------------
-# 自检（仅在脚本直跑时执行；import money 无副作用、无输出）
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------

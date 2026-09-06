@@ -339,6 +339,12 @@ class PayClockApp:
             return
         candidate = {**self.cfg, "leaves": {**self.cfg.get("leaves", {}),
                                            today.isoformat(): leave_type}}
+        # A2 预检：标完最后一个工作日会使 D=0，先把非法配置写盘会被下次启动整表重置
+        if money.month_paid_days(datetime.now().year, datetime.now().month,
+                                 candidate["leaves"],
+                                 candidate["holiday_mode"]) <= 0:
+            self._set_status("标记失败：本月应出勤天数已用尽")
+            return
         if not save_config(candidate):
             self._set_status("警告：config.json 写入失败")
             return
@@ -696,7 +702,6 @@ class PayClockApp:
         self._leaves_draft = dict(self.cfg.get("leaves", {}))
         self._cal_holder = tk.Frame(form, bg=t["dlg_bg"])
         self._cal_holder.grid(row=4, column=0, columnspan=2, pady=(2, 6))
-        self._rebuild_calendar()
 
         # 5) 发薪日
         row(5, "发薪日（1–31）")
