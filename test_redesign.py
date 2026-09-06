@@ -32,6 +32,26 @@ def check_bake():
     print("bake OK", {k: round(v) for k, v in avgs.items()})
 
 
+def check_migration():
+    import app
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, "config.json")
+        base = dict(app.DEFAULT_CONFIG)
+        for legacy, want in (("mint", "glass"), ("amber", "glass"), ("sky", "glass")):
+            base["theme"] = legacy
+            with open(p, "w", encoding="utf-8") as fh:
+                json.dump(base, fh)
+            cfg, warn = app.load_config(p)
+            assert cfg["theme"] == want, (legacy, cfg["theme"])
+        base["theme"] = "nope"
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump(base, fh)
+        cfg, _ = app.load_config(p)
+        assert cfg["theme"] == "midnight", cfg["theme"]
+    print("migration OK")
+
+
 if __name__ == "__main__":
+    check_migration()
     check_bake()
     print("ALL OK")

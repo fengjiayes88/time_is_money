@@ -38,7 +38,7 @@ DEFAULT_CONFIG = {
     "monthly_holidays": 2,
     "free_holidays": [],        # free 模式：当月已标记休息的 ISO 日期列表
     "payday": 15,
-    "theme": "mint",
+    "theme": "midnight",
     "last_asked_date": "",
 }
 
@@ -83,12 +83,43 @@ def compute_layout(w: int, h: int) -> dict:
         "status": (w // 2, int(h * 0.925)),
     }
 
-# 主题仅决定强调色（大金额数字 / 状态行 / 主按钮）；exploit 为加班强制态配色
+# 主题 = 完整外观 token（冰蓝强调色锁定：暗色 #7DB8FF / 亮色 #0A84FF / glass #0066D6）
 THEMES = {
-    "mint": {"accent": "#0FA36B", "label": "薄荷绿"},
-    "amber": {"accent": "#E58E1A", "label": "暖阳橙"},
-    "sky": {"accent": "#0A84FF", "label": "天空蓝"},
+    "midnight": {
+        "label": "暗夜玻璃",
+        "accent": "#7DB8FF", "title": "#F5F5F7", "ink": "#F5F5F7",
+        "label_ink": "#9698A3", "sub": "#6B6E78",
+        "dlg_bg": "#1C1E24", "field_bg": "#26282F", "field_fg": "#F5F5F7",
+        "line": "#3A3D46", "btn_bg": "#7DB8FF", "btn_fg": "#0F1216",
+        "btn_active": "#99C6FF", "btn2_bg": "#2E3138", "btn2_fg": "#F5F5F7",
+        "err": "#FF6B6B", "menu_bg": "#1C1E24", "menu_fg": "#F5F5F7",
+        "menu_active_bg": "#7DB8FF", "menu_active_fg": "#0F1216",
+        "menu_disabled": "#6B6E78", "fallback": "#1F2128",
+    },
+    "paper": {
+        "label": "纯净亮色",
+        "accent": "#0A84FF", "title": "#3A3A3C", "ink": "#1D1D1F",
+        "label_ink": "#6E6E73", "sub": "#98989D",
+        "dlg_bg": "#F5F5F7", "field_bg": "#FFFFFF", "field_fg": "#1D1D1F",
+        "line": "#D2D2D7", "btn_bg": "#0A84FF", "btn_fg": "#FFFFFF",
+        "btn_active": "#3395FF", "btn2_bg": "#E9E9EB", "btn2_fg": "#1D1D1F",
+        "err": "#E02D2D", "menu_bg": "#F5F5F7", "menu_fg": "#1D1D1F",
+        "menu_active_bg": "#0A84FF", "menu_active_fg": "#FFFFFF",
+        "menu_disabled": "#B0B0B5", "fallback": "#F7F8FA",
+    },
+    "glass": {
+        "label": "经典白玻璃",
+        "accent": "#0066D6", "title": "#FFFFFF", "ink": "#1D1D1F",
+        "label_ink": "#515154", "sub": "#6E6E73",
+        "dlg_bg": "#F5F5F7", "field_bg": "#FFFFFF", "field_fg": "#1D1D1F",
+        "line": "#D2D2D7", "btn_bg": "#0066D6", "btn_fg": "#FFFFFF",
+        "btn_active": "#2A7AE0", "btn2_bg": "#E9E9EB", "btn2_fg": "#1D1D1F",
+        "err": "#E02D2D", "menu_bg": "#F5F5F7", "menu_fg": "#1D1D1F",
+        "menu_active_bg": "#0066D6", "menu_active_fg": "#FFFFFF",
+        "menu_disabled": "#B0B0B5", "fallback": "#F2F3F5",
+    },
 }
+LEGACY_THEME = {"mint": "glass", "amber": "glass", "sky": "glass"}  # 旧强调色 → 观感最接近
 MODE_LABELS = {"weekend": "固定周末公休", "free": "自由假期（当月任选）"}
 
 INK = "#1D1D1F"                  # 主文字（苹果深灰墨色）
@@ -129,17 +160,18 @@ def config_path() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), CONFIG_FILENAME)
 
 
-def load_config() -> tuple[dict, str]:
+def load_config(path: str | None = None) -> tuple[dict, str]:
     """读取 config.json，返回 (config, 警告文案)。
 
     缺失 → 默认值；JSON 损坏或字段非法 → 重置默认并提示（R4）。
+    theme 旧值（mint/amber/sky）自动迁移；非法 theme 回退 midnight（不重置整表）。
     """
     cfg = dict(DEFAULT_CONFIG)
-    path = config_path()
-    if not os.path.exists(path):
+    target = path or config_path()
+    if not os.path.exists(target):
         return cfg, ""
     try:
-        with open(path, "r", encoding="utf-8") as fh:
+        with open(target, "r", encoding="utf-8") as fh:
             data = json.load(fh)
         if not isinstance(data, dict):
             raise ValueError("config root is not a JSON object")
@@ -155,8 +187,9 @@ def load_config() -> tuple[dict, str]:
                           loaded["work_end"], loaded["monthly_holidays"],
                           loaded["payday"], loaded["holiday_mode"]):
             raise ValueError("config fields failed money.validate")
+        loaded["theme"] = LEGACY_THEME.get(loaded["theme"], loaded["theme"])
         if loaded["theme"] not in THEMES:
-            raise ValueError("unknown theme key")
+            loaded["theme"] = "midnight"
         loaded["last_asked_date"] = str(loaded["last_asked_date"])
         return loaded, ""
     except (OSError, ValueError):
