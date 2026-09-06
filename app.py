@@ -38,7 +38,10 @@ DEFAULT_CONFIG = {
     "work_start": "09:00",
     "work_end": "18:00",
     "holiday_mode": "weekend",  # weekend=固定周末公休 | free=自由假期
-    "leaves": {},               # 当月休假标记：ISO 日期 → "调休"/"请假"（两模式通用）
+    "leaves": {                 # 分模式当月休假：{模式: {ISO 日期: "调休"/"请假"}}，互不影响
+        "weekend": {},
+        "free": {},
+    },
     "payday": 15,
     "theme": "midnight",
     "last_asked_date": "",
@@ -166,6 +169,8 @@ def load_config(path: str | None = None) -> tuple[dict, str]:
     theme 旧值（mint/amber/sky）自动迁移；非法 theme 回退 midnight（不重置整表）。
     """
     cfg = dict(DEFAULT_CONFIG)
+    # 嵌套 leaves 浅拷会与 DEFAULT_CONFIG 共享可变对象，必须逐层复制
+    cfg["leaves"] = {m: dict(v) for m, v in DEFAULT_CONFIG["leaves"].items()}
     target = path or config_path()
     if not os.path.exists(target):
         return cfg, ""
@@ -180,19 +185,27 @@ def load_config(path: str | None = None) -> tuple[dict, str]:
                 loaded[key] = data[key]
         if loaded["holiday_mode"] not in ("weekend", "free"):
             raise ValueError("bad holiday_mode")
+        loaded["leaves"] = {"weekend": {}, "free": {}}
+        legacy = {}
         fh = data.get("free_holidays", [])
         if not isinstance(fh, list):  # 标量/对象 → 沿袭 R4 整表重置；缺失容忍（新配置无此键）
             raise ValueError("bad free_holidays")
-        loaded["leaves"] = {}
-        for d in fh:  # 旧自由假日 → 调休
+        for d in fh:  # 旧自由假日 → 调休（归入 free 组）
             if isinstance(d, str):
-                loaded["leaves"][d] = "调休"
-        if isinstance(data.get("leaves"), dict):      # 新字段优先
-            loaded["leaves"].update(data["leaves"])
-        elif data.get("leaves") is not None:
+                legacy[d] = "调休"
+        raw = data.get("leaves")
+        if isinstance(raw, dict):
+            if "weekend" in raw or "free" in raw:      # 嵌套形态（分模式）
+                for mode in ("weekend", "free"):
+                    if isinstance(raw.get(mode), dict):
+                        loaded["leaves"][mode].update(raw[mode])
+            else:                                       # 本分支早期 flat 形态 → free 组
+                loaded["leaves"]["free"].update(raw)
+        elif raw is not None:
             raise ValueError("bad leaves")  # 非法类型 → 沿袭 R4 整表重置
+        loaded["leaves"]["free"].update(legacy)  # 旧自由假日最后放，不覆盖已有
         if money.validate(loaded["monthly_salary"], loaded["work_start"],
-                          loaded["work_end"], loaded["leaves"],
+                          loaded["work_end"], loaded["leaves"][loaded["holiday_mode"]],
                           loaded["payday"], loaded["holiday_mode"]):
             raise ValueError("config fields failed money.validate")
         loaded["theme"] = str(loaded["theme"])  # 防不可哈希 JSON 值在下方查找中抛 TypeError
@@ -305,7 +318,8 @@ class PayClockApp:
         """今天已标记 → 「取消标记」可用；未标记 → 禁用（调休/请假随时可点）。"""
         if self._today_menu is None:
             return
-        marked = datetime.now().date().isoformat() in self.cfg.get("leaves", {})
+        mode_leaves = self.cfg["leaves"].get(self.cfg["holiday_mode"], {})
+        marked = datetime.now().date().isoformat() in mode_leaves
         self._today_menu.entryconfig(2, state="normal" if marked else "disabled")
 
     def _apply_window_chrome(self, initial: bool = False) -> None:
@@ -333,17 +347,18 @@ class PayClockApp:
             pass
 
     def _mark_today(self, leave_type: str) -> None:
-        """把今天标记为指定类型休假（weekend 模式周末本就休息，拒绝标记）。"""
+        """把今天标记为指定类型休假（weekend 模式的公休日拒绝标记）。"""
         today = datetime.now().date()
-        if self.cfg["holiday_mode"] == "weekend" and today.weekday() >= 5:
-            self._set_status("周末本就休息，无需标记")
+        mode = self.cfg["holiday_mode"]
+        if today.isoformat() in money.fixed_rest_iso(today.year, today.month, mode):
+            self._set_status("公休日本就休息，无需标记")
             return
-        candidate = {**self.cfg, "leaves": {**self.cfg.get("leaves", {}),
-                                           today.isoformat(): leave_type}}
+        leaves = {m: dict(v) for m, v in self.cfg["leaves"].items()}
+        leaves[mode][today.isoformat()] = leave_type
+        candidate = {**self.cfg, "leaves": leaves}
         # A2 预检：标完最后一个工作日会使 D=0，先把非法配置写盘会被下次启动整表重置
         if money.month_paid_days(datetime.now().year, datetime.now().month,
-                                 candidate["leaves"],
-                                 candidate["holiday_mode"]) <= 0:
+                                 candidate["leaves"][mode], mode) <= 0:
             self._set_status("标记失败：本月应出勤天数已用尽")
             return
         if not save_config(candidate):
@@ -357,11 +372,13 @@ class PayClockApp:
 
     def _unmark_today(self) -> None:
         """取消今天的休假标记（未标记时静默返回）。"""
+        mode = self.cfg["holiday_mode"]
         key = datetime.now().date().isoformat()
-        if key not in self.cfg.get("leaves", {}):
+        if key not in self.cfg["leaves"].get(mode, {}):
             return
-        candidate = {**self.cfg,
-                     "leaves": {k: v for k, v in self.cfg["leaves"].items() if k != key}}
+        leaves = {m: dict(v) for m, v in self.cfg["leaves"].items()}
+        leaves[mode].pop(key, None)
+        candidate = {**self.cfg, "leaves": leaves}
         if not save_config(candidate):
             self._set_status("警告：config.json 写入失败", clear_ms=0)
             return
@@ -570,12 +587,16 @@ class PayClockApp:
         return box, hv, mv
 
     def _build_calendar(self, parent, draft: dict, mode: str) -> tk.Frame:
-        """当月日历多选：单击循环 计薪→调休→请假→计薪。草稿写入 draft（原地）。"""
+        """当月日历多选：单击循环 计薪→调休→请假→计薪。草稿写入 draft（原地）。
+
+        fixed 公休格（weekend 模式 = 周末非补班 + 法定节休；free = 空集）
+        由 money.fixed_rest_iso 决定，不可点击；两模式各自 draft 互不影响。"""
         import calendar as _cal
         t = self._tokens()
         now = datetime.now()
         y, m = now.year, now.month
         today_iso = now.date().isoformat()
+        fixed_iso = money.fixed_rest_iso(y, m, mode)
         weeks = _cal.Calendar(firstweekday=0).monthdayscalendar(y, m)
         frame = tk.Frame(parent, bg=t["dlg_bg"])
         for c, name in enumerate(("一", "二", "三", "四", "五", "六", "日")):
@@ -591,7 +612,7 @@ class PayClockApp:
                     tk.Label(frame, text="", bg=t["dlg_bg"], width=3).grid(row=r, column=c)
                     continue
                 iso = f"{y:04d}-{m:02d}-{day:02d}"
-                fixed = (mode == "weekend" and date(y, m, day).weekday() >= 5)
+                fixed = iso in fixed_iso
                 btn = tk.Button(frame, width=3, relief="flat", bd=0, font=FONT_APP_SMALL)
 
                 def paint(b=btn, d=day, iso=iso, fixed=fixed):
@@ -624,12 +645,13 @@ class PayClockApp:
         return frame
 
     def _rebuild_calendar(self) -> None:
-        """按草稿休假模式重建日历（weekend 禁用格随草稿模式变化）。"""
+        """按草稿休假模式重建日历：编辑对应模式的 draft，固定格由 money 决定。"""
         for w in self._cal_holder.winfo_children():
             w.destroy()
+        mode = self._mode_var.get()
         # 内层 frame 必须显式 grid，否则整历不映射（0 尺寸不可见）
-        self._build_calendar(self._cal_holder, self._leaves_draft,
-                             self._mode_var.get()).grid(padx=2, pady=2)
+        self._build_calendar(self._cal_holder, self._leaves_draft[mode],
+                             mode).grid(padx=2, pady=2)
 
     def _open_settings(self) -> None:
         dlg = self.settings_dialog
@@ -699,8 +721,12 @@ class PayClockApp:
                            activeforeground=t["ink"],
                            command=self._on_mode_change).pack(side="left", padx=(0, 10))
 
-        # 4) 当月休假：日历多选（单击循环 计薪→调休→请假；草稿制，保存才生效）
-        self._leaves_draft = dict(self.cfg.get("leaves", {}))
+        # 4) 当月休假：日历多选（单击循环 计薪→调休→请假；草稿制，保存才生效；
+        #    分模式草稿，两模式标记互不影响）
+        raw_leaves = self.cfg.get("leaves", {})
+        self._leaves_draft = {
+            m: dict(raw_leaves.get(m, {})) if isinstance(raw_leaves.get(m), dict) else {}
+            for m in ("weekend", "free")}
         self._cal_holder = tk.Frame(form, bg=t["dlg_bg"])
         self._cal_holder.grid(row=4, column=0, columnspan=2, pady=(2, 6))
 
@@ -749,9 +775,11 @@ class PayClockApp:
             return
         mode = self._mode_var.get()
         prefix = datetime.now().strftime("%Y-%m-")
-        leaves = {k: v for k, v in self._leaves_draft.items()
-                  if isinstance(k, str) and k.startswith(prefix)}
-        errors = money.validate(salary, ws, we, leaves, payday, mode)
+        # 两模式草稿都做当月过滤写回（未编辑模式原样保留），互不覆盖
+        leaves = {m: {k: v for k, v in self._leaves_draft.get(m, {}).items()
+                      if isinstance(k, str) and k.startswith(prefix)}
+                  for m in ("weekend", "free")}
+        errors = money.validate(salary, ws, we, leaves[mode], payday, mode)
         if errors:
             self._dlg_status.configure(text="保存失败：" + "；".join(errors))
             return
@@ -810,20 +838,24 @@ class PayClockApp:
         self._close_ask_dialog()             # 重置当日询问内存态
 
     def _refresh_month_cache(self, now: datetime) -> None:
-        # leaves 只保留当月标记，跨月自动清零；秒薪/日薪整月按新口径重算
+        # leaves 两模式各自只保留当月标记，跨月自动清零；秒薪/日薪按当前模式整月重算
         prefix = f"{now.year:04d}-{now.month:02d}-"
-        self.cfg["leaves"] = {k: v for k, v in self.cfg.get("leaves", {}).items()
-                              if isinstance(k, str) and k.startswith(prefix)}
+        self.cfg["leaves"] = {
+            m: {k: v for k, v in self.cfg["leaves"].get(m, {}).items()
+                if isinstance(k, str) and k.startswith(prefix)}
+            for m in ("weekend", "free")}
         mode = self.cfg["holiday_mode"]
+        active = self.cfg["leaves"].get(mode, {})
         self.pss = money.per_second_salary(
-            self.cfg["monthly_salary"], now.year, now.month, self.cfg["leaves"],
+            self.cfg["monthly_salary"], now.year, now.month, active,
             self.cfg["work_start"], self.cfg["work_end"], mode)
         self.daily = money.daily_salary(
-            self.cfg["monthly_salary"], now.year, now.month, self.cfg["leaves"],
+            self.cfg["monthly_salary"], now.year, now.month, active,
             self.cfg["work_start"], self.cfg["work_end"], mode)
 
     def _is_workday(self, d) -> bool:
-        return money.is_workday(d, self.cfg.get("leaves", {}), self.cfg["holiday_mode"])
+        return money.is_workday(d, self.cfg["leaves"].get(self.cfg["holiday_mode"], {}),
+                                self.cfg["holiday_mode"])
 
     def _update_display(self, now: datetime) -> None:
         cfg = self.cfg
@@ -841,7 +873,8 @@ class PayClockApp:
             return
         ic("today", font=scale_fonts(self._win_w, self._mono)["huge"])  # 从占位态恢复大字号
         ws, we = cfg["work_start"], cfg["work_end"]
-        leaves, mode = cfg.get("leaves", {}), cfg["holiday_mode"]
+        mode = cfg["holiday_mode"]
+        leaves = cfg["leaves"].get(mode, {})
         ic("today",
            text=f"{money.earned_today(self.pss, now, ws, we, leaves, mode):,.2f}")
         today_type = leaves.get(now.date().isoformat())
