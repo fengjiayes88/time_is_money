@@ -8,7 +8,7 @@
 - 月薪为机密：设置弹窗中默认以 • 掩码显示，可勾选「显示」临时查看；
 - 上班开始/结束用 Spinbox 时间选择控件（只读+循环滚动），非手输框；
 - 休假两种模式：weekend=固定周末公休+每月额外假期；free=自由假期（当月任选 N 天，
-  周末照常上班，通过顶部菜单「标记今天休息」逐日标记）；
+  周末照常上班，通过顶部菜单「标记今天」或设置日历标记休假（调休/请假））；
 - 主界面聚焦实时收入：今日已赚超大字号居中；设置收进顶部菜单栏（苹果风）；
 - 三套主题（midnight/paper/glass）共享一套冰蓝强调色 token 表；主数字等宽字体；
   加班期切暗黑壁纸（模糊压暗 + 红字）；单实例互斥体防多开。
@@ -180,8 +180,11 @@ def load_config(path: str | None = None) -> tuple[dict, str]:
                 loaded[key] = data[key]
         if loaded["holiday_mode"] not in ("weekend", "free"):
             raise ValueError("bad holiday_mode")
+        fh = data.get("free_holidays", [])
+        if not isinstance(fh, list):  # 标量/对象 → 沿袭 R4 整表重置；缺失容忍（新配置无此键）
+            raise ValueError("bad free_holidays")
         loaded["leaves"] = {}
-        for d in (data.get("free_holidays") or []):  # 旧自由假日 → 调休
+        for d in fh:  # 旧自由假日 → 调休
             if isinstance(d, str):
                 loaded["leaves"][d] = "调休"
         if isinstance(data.get("leaves"), dict):      # 新字段优先
@@ -242,6 +245,7 @@ class PayClockApp:
         self._menu_bar = None          # 菜单引用（_restyle_menu 用，None 守卫）
         self._menu_set = None
         self._theme_menu = None
+        self._today_menu = None        # 「标记今天」子菜单引用
         # 等宽字体探测（Consolas → Cascadia Mono → Courier New，按系统可用性回退）
         fams = set(tkfont.families(root))
         self._mono = ("Consolas" if "Consolas" in fams
@@ -284,27 +288,24 @@ class PayClockApp:
         self._theme_menu = m_theme
         self._menu_set = m_set
 
-        # 「标记今天」子菜单（调休/请假/取消标记）由任务 3 接管；过渡期挂起旧入口
-        # （_toggle_today_holiday 已由 _mark_today/_unmark_today 取代，见本提交）
-        # menubar.add_command(label="标记今天休息",
-        #                     command=self._toggle_today_holiday)
-        # self._holiday_idx = menubar.index("end")
+        # 「标记今天」子菜单：调休/请假/取消标记（两种假期模式都可用）
+        m_today = apple_menu(menubar)
+        m_today.add_command(label="调休", command=lambda: self._mark_today("调休"))
+        m_today.add_command(label="请假", command=lambda: self._mark_today("请假"))
+        m_today.add_command(label="取消标记", command=self._unmark_today)
+        menubar.add_cascade(label="标记今天", menu=m_today)
+        self._today_menu = m_today
         self._menu_bar = menubar
         self.root.configure(menu=menubar)
         self._restyle_menu()
-        # self._update_holiday_menu()  # 任务 3 恢复为 _update_today_menu()
+        self._update_today_menu()
 
-    def _update_holiday_menu(self) -> None:
-        """free 模式才可用「标记今天休息」，并按当日标记状态切换文案。"""
-        free_mode = self.cfg["holiday_mode"] == "free"
-        self._menu_bar.entryconfig(self._holiday_idx,
-                                   state="normal" if free_mode else "disabled")
-        if free_mode:
-            today_iso = datetime.now().date().isoformat()
-            marked = today_iso in self.cfg["free_holidays"]
-            self._menu_bar.entryconfig(
-                self._holiday_idx,
-                label="取消今天休息" if marked else "标记今天休息")
+    def _update_today_menu(self) -> None:
+        """今天已标记 → 「取消标记」可用；未标记 → 禁用（调休/请假随时可点）。"""
+        if self._today_menu is None:
+            return
+        marked = datetime.now().date().isoformat() in self.cfg.get("leaves", {})
+        self._today_menu.entryconfig(2, state="normal" if marked else "disabled")
 
     def _apply_window_chrome(self, initial: bool = False) -> None:
         """窗口圆角（Win10/11 均可用，SetWindowRgn + GDI 圆角矩形区域）。
@@ -460,7 +461,7 @@ class PayClockApp:
     def _restyle_menu(self) -> None:
         """菜单栏/子菜单按当前主题换肤（构建后与主题切换时各调一次）。"""
         t = self._tokens()
-        for m in (self._menu_bar, self._menu_set, self._theme_menu):
+        for m in (self._menu_bar, self._menu_set, self._theme_menu, self._today_menu):
             if m is not None:
                 m.configure(bg=t["menu_bg"], fg=t["menu_fg"],
                             activebackground=t["menu_active_bg"],
@@ -695,7 +696,7 @@ class PayClockApp:
         self.cfg.update(candidate)
         self.configured = True
         self._refresh_month_cache(datetime.now())
-        # self._update_holiday_menu()  # 任务 3 恢复为 _update_today_menu()
+        self._update_today_menu()
         self._set_status("已保存")
         self._update_display(datetime.now())
         dlg.destroy()
@@ -737,7 +738,7 @@ class PayClockApp:
     def _on_date_rollover(self, now: datetime) -> None:
         self.cached_date = now.date()
         self._refresh_month_cache(now)       # 跨月重算秒薪等月度派生值
-        # self._update_holiday_menu()        # 任务 3 恢复为 _update_today_menu()
+        self._update_today_menu()            # 跨日刷新「取消标记」可用态
         self._close_ask_dialog()             # 重置当日询问内存态
 
     def _refresh_month_cache(self, now: datetime) -> None:
@@ -753,11 +754,8 @@ class PayClockApp:
             self.cfg["monthly_salary"], now.year, now.month, self.cfg["leaves"],
             self.cfg["work_start"], self.cfg["work_end"], mode)
 
-    def _free_set(self) -> frozenset:
-        return frozenset(self.cfg["free_holidays"])
-
     def _is_workday(self, d) -> bool:
-        return money.is_workday(d, self._free_set(), self.cfg["holiday_mode"])
+        return money.is_workday(d, self.cfg.get("leaves", {}), self.cfg["holiday_mode"])
 
     def _update_display(self, now: datetime) -> None:
         cfg = self.cfg
@@ -775,11 +773,18 @@ class PayClockApp:
             return
         ic("today", font=scale_fonts(self._win_w, self._mono)["huge"])  # 从占位态恢复大字号
         ws, we = cfg["work_start"], cfg["work_end"]
-        fset, mode = self._free_set(), cfg["holiday_mode"]
+        leaves, mode = cfg.get("leaves", {}), cfg["holiday_mode"]
         ic("today",
-           text=f"{money.earned_today(self.pss, now, ws, we, fset, mode):,.2f}")
-        ic("sub", text=self._off_work_text(now, we))
-        month_earned = money.earned_this_month(self.pss, now, ws, we, fset, mode)
+           text=f"{money.earned_today(self.pss, now, ws, we, leaves, mode):,.2f}")
+        today_type = leaves.get(now.date().isoformat())
+        if today_type == "请假":
+            sub_text = f"请假中 · 今天没了 {self.daily:,.2f} 元"
+        elif today_type == "调休":
+            sub_text = "调休中 · 今日不计薪，秒薪已上调"
+        else:
+            sub_text = self._off_work_text(now, we)
+        ic("sub", text=sub_text)
+        month_earned = money.earned_this_month(self.pss, now, ws, we, leaves, mode)
         ic("sv0", text=f"{month_earned:,.2f}")
         ic("sv2", text=f"{self.pss:.4f}")
         days = money.days_until_payday(now.date(), cfg["payday"])
