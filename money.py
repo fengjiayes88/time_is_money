@@ -6,9 +6,11 @@
 - 所有 assert 自检位于 `if __name__ == "__main__":` 守卫内，
   `import money` 无任何副作用与输出。
 
-语义锚点（MASTER_PLAN + leaves 规格 §2）：
+语义锚点（MASTER_PLAN + leaves 规格 §2/§12）：
 - A1 周末 = 周六+周日（weekday() >= 5）；weekend 模式工作日 = 周一至周五
 - A1b free 自由假期模式：周末照常上班，仅 leaves 标记日休息（调休/请假均休息）
+- A1c 法定节假日表（2026，国办发明电〔2025〕7号）：weekend 模式下法定节休视为公休、
+  补班周末视为工作日；free 模式不受节日表影响（自由排班自行决定）
 - A2 调休进秒薪分母（重算秒薪、月薪守恒）；请假不进分母（扣当日日薪）；D ≤ 0 报错
 - A2b 日薪 = 月薪 / D（D = 应出勤天数 = base − 调休数）
 - A3 同一天 HH:MM 且 start < end
@@ -28,6 +30,8 @@ __all__ = [
     "LEAVE_TYPES",
     "month_days",
     "month_weekend_days",
+    "month_base_workdays",
+    "fixed_rest_iso",
     "month_paid_days",
     "daily_salary",
     "daily_work_seconds",
@@ -98,6 +102,38 @@ def month_weekend_days(y: int, m: int) -> int:
                if date(y, m, d).weekday() >= 5)
 
 
+# ---------------------------------------------------------------------------
+# 法定节假日表（按年组织；缺失年份不识别节日，退化为纯周末口径）
+# ---------------------------------------------------------------------------
+
+def _date_range(y: int, m1: int, d1: int, m2: int, d2: int) -> list[date]:
+    """闭区间 [y-m1-d1, y-m2-d2] 的日期列表。"""
+    start = date(y, m1, d1)
+    return [start + timedelta(i) for i in range((date(y, m2, d2) - start).days + 1)]
+
+
+# 放假区间 (月, 日, 月, 日)；来源：国办发明电〔2025〕7号（2026 年安排）
+_STATUTORY_SPANS = {
+    2026: [(1, 1, 1, 3), (2, 15, 2, 23), (4, 4, 4, 6), (5, 1, 5, 5),
+           (6, 19, 6, 21), (9, 25, 9, 27), (10, 1, 10, 7)],
+}
+
+# 法定调休补班的周末（按工作日对待）
+_STAT_WORK = {
+    2026: frozenset({"2026-01-04", "2026-02-14", "2026-02-28",
+                     "2026-05-09", "2026-09-20", "2026-10-10"}),
+}
+
+_STAT_REST = {year: frozenset(d.isoformat() for m1, d1, m2, d2 in spans
+                              for d in _date_range(year, m1, d1, m2, d2))
+              for year, spans in _STATUTORY_SPANS.items()}
+
+
+def _stat_rest_iso(d: date) -> bool:
+    """d 是否为法定节休（仅限已收录年份，当前为 2026）。"""
+    return d.isoformat() in _STAT_REST.get(d.year, frozenset())
+
+
 def daily_work_seconds(start_hm: str, end_hm: str) -> int:
     """每日工作秒数 = (end − start) 秒（A3：同一天，start < end）。"""
     return (_parse_hm_minutes(end_hm) - _parse_hm_minutes(start_hm)) * 60
@@ -117,25 +153,68 @@ def _month_leave_count(y: int, m: int, leaves, leave_type: str) -> int:
 
 def is_workday(d: date, leaves=None, mode: str = "weekend") -> bool:
     """工作日判定：任何休假日（调休/请假）→ False；
-    weekend：周一至周五；free：周末照常上班（A1/A1b）。"""
+    weekend：周一至五 + 法定补班周末 − 法定节休；
+    free：周末照常上班且不识别节日表（A1/A1b/A1c）。"""
     if isinstance(leaves, dict) and leaves.get(d.isoformat()) in LEAVE_TYPES:
         return False
     if mode == "free":
         return True
-    return d.weekday() < 5
+    if _stat_rest_iso(d):
+        return False
+    if d.weekday() >= 5:
+        return d.isoformat() in _STAT_WORK.get(d.year, frozenset())
+    return True
+
+
+def month_base_workdays(y: int, m: int, mode: str = "weekend") -> int:
+    """模式基准工作日数（不含任何 leaves）。
+
+    weekend：周一至五 + 法定补班周末 − 法定节休；free：月天数（周末照常上班，
+    节日不特判——自由排班自行决定，规格 §12.3）。
+    """
+    if mode == "free":
+        return month_days(y, m)
+    work = _STAT_WORK.get(y, frozenset())
+    n = 0
+    for i in range(1, month_days(y, m) + 1):
+        d = date(y, m, i)
+        if _stat_rest_iso(d):
+            continue
+        if d.weekday() >= 5 and d.isoformat() not in work:
+            continue
+        n += 1
+    return n
+
+
+def fixed_rest_iso(y: int, m: int, mode: str = "weekend") -> frozenset:
+    """当月「固定公休」ISO 日期集合（不含任何 leaves）。
+
+    weekend：非基准工作日（周末非补班 + 法定节休）；free：空集（全可标）。
+    app 日历据此渲染不可修改的公休格（规格 §12.2）。
+    """
+    if mode == "free":
+        return frozenset()
+    rest = _STAT_REST.get(y, frozenset())
+    work = _STAT_WORK.get(y, frozenset())
+    out = []
+    for i in range(1, month_days(y, m) + 1):
+        d = date(y, m, i)
+        iso = d.isoformat()
+        if iso in rest or (d.weekday() >= 5 and iso not in work):
+            out.append(iso)
+    return frozenset(out)
 
 
 def month_paid_days(y: int, m: int, leaves, mode: str = "weekend") -> int:
     """当月应出勤天数 D（规格 §2）：base − 调休数。
 
     调休进分母（重算秒薪），请假不进（扣日薪语义）。
-    base：weekend = 月天数 − 周末数；free = 月天数。
+    base：weekend = month_base_workdays（扣周末与法定节休、含补班周末）；
+    free = 月天数。
     """
     leaves = leaves if isinstance(leaves, dict) else {}
     t = _month_leave_count(y, m, leaves, "调休")
-    if mode == "free":
-        return month_days(y, m) - t
-    return month_days(y, m) - month_weekend_days(y, m) - t
+    return month_base_workdays(y, m, mode) - t
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +563,38 @@ if __name__ == "__main__":
         check(month_paid_seconds(datetime(2024, 7, 1, 0, 0, 0), "09:00", "18:00") == 0,
               "1 号 00:00 本月秒数应为 0")
         check(math.isclose(pss * denom, 10000, rel_tol=1e-9), "秒薪×分母应还原月薪")
+
+        # ---- §H 2026 法定节假日（国办发明电〔2025〕7号，weekend 模式）----
+        check(is_workday(date(2026, 10, 1), {}, "weekend") is False,
+              "2026-10-01 国庆（周四）应为法定节休")
+        check(is_workday(date(2026, 9, 25), {}, "weekend") is False,
+              "2026-09-25 中秋（周五）应为法定节休")
+        check(is_workday(date(2026, 2, 16), {}, "weekend") is False,
+              "2026-02-16 春节（周一）应为法定节休")
+        check(is_workday(date(2026, 10, 10), {}, "weekend") is True,
+              "2026-10-10 周六补班应为工作日")
+        check(is_workday(date(2026, 2, 14), {}, "weekend") is True,
+              "2026-02-14 周六补班应为工作日")
+        check(month_base_workdays(2026, 10, "weekend") == 18,
+              "2026-10 base 应 18（22 平日 − 5 平日节休 + 1 补班周六）")
+        check(month_paid_days(2026, 10, {"2026-10-13": "调休"}, "weekend") == 17,
+              "2026-10 加 1 天调休 → D 应 17")
+        check(is_workday(date(2026, 10, 1), {}, "free") is True,
+              "free 模式法定节休照常为可工作日（自由排班）")
+        check(month_paid_days(2026, 10, {}, "free") == 31,
+              "free 模式 10 月 D 应 31（节日不特判）")
+        check(is_workday(date(2027, 10, 1), {}, "weekend") is True,
+              "2027 无节日表：10-01 周五应为普通工作日")
+        check(month_base_workdays(2027, 10, "weekend") == 21,
+              "2027-10 base 应 21（31 − 10 周末，无节休无补班）")
+        fixed_oct = fixed_rest_iso(2026, 10, "weekend")
+        check(len(fixed_oct) == 13,
+              "2026-10 固定公休应 13 天（9 周末 − 1 补班 + 5 平日节休）")
+        check(fixed_rest_iso(2026, 10, "free") == frozenset(),
+              "free 模式无固定公休")
+        check("2026-10-01" in fixed_oct and "2026-10-03" in fixed_oct
+              and "2026-10-10" not in fixed_oct,
+              "固定公休应含 10-01/10-03、不含补班的 10-10")
 
         return passed
 
