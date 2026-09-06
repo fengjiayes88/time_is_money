@@ -28,7 +28,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 import tkinter.messagebox
 import winsound
-from datetime import datetime
+from datetime import date, datetime
 
 import money
 
@@ -562,6 +562,68 @@ class PayClockApp:
         m_spin.pack(side="left")
         return box, hv, mv
 
+    def _build_calendar(self, parent, draft: dict, mode: str) -> tk.Frame:
+        """当月日历多选：单击循环 计薪→调休→请假→计薪。草稿写入 draft（原地）。"""
+        import calendar as _cal
+        t = self._tokens()
+        now = datetime.now()
+        y, m = now.year, now.month
+        today_iso = now.date().isoformat()
+        weeks = _cal.Calendar(firstweekday=0).monthdayscalendar(y, m)
+        frame = tk.Frame(parent, bg=t["dlg_bg"])
+        for c, name in enumerate(("一", "二", "三", "四", "五", "六", "日")):
+            tk.Label(frame, text=name, font=FONT_APP_SMALL, width=3,
+                     bg=t["dlg_bg"], fg=t["sub"]).grid(row=0, column=c)
+        painters = []
+        state_style = {None: (t["field_bg"], t["ink"]),
+                       "调休": (t["btn_bg"], t["btn_fg"]),
+                       "请假": (t["err"], "#FFFFFF")}
+        for r, week in enumerate(weeks, start=1):
+            for c, day in enumerate(week):
+                if day == 0:
+                    tk.Label(frame, text="", bg=t["dlg_bg"], width=3).grid(row=r, column=c)
+                    continue
+                iso = f"{y:04d}-{m:02d}-{day:02d}"
+                fixed = (mode == "weekend" and date(y, m, day).weekday() >= 5)
+                btn = tk.Button(frame, width=3, relief="flat", bd=0, font=FONT_APP_SMALL)
+
+                def paint(b=btn, d=day, iso=iso, fixed=fixed):
+                    if fixed:
+                        b.configure(text=str(d), bg=t["dlg_bg"], fg=t["menu_disabled"],
+                                    highlightthickness=0, state="disabled", cursor="arrow")
+                        return
+                    bg, fg = state_style.get(draft.get(iso), state_style[None])
+                    b.configure(text=str(d), bg=bg, fg=fg, state="normal", cursor="hand2",
+                                activebackground=bg, activeforeground=fg,
+                                highlightthickness=2 if iso == today_iso else 0,
+                                highlightbackground=t["accent"], highlightcolor=t["accent"])
+
+                def click(iso=iso, fixed=fixed):
+                    if fixed:
+                        return
+                    cycle = {None: "调休", "调休": "请假", "请假": None}
+                    nxt = cycle.get(draft.get(iso), "调休")
+                    if nxt is None:
+                        draft.pop(iso, None)
+                    else:
+                        draft[iso] = nxt
+                    for fn in painters:
+                        fn()
+
+                btn.configure(command=click)
+                btn.grid(row=r, column=c, padx=1, pady=1)
+                painters.append(paint)
+                paint()
+        return frame
+
+    def _rebuild_calendar(self) -> None:
+        """按草稿休假模式重建日历（weekend 禁用格随草稿模式变化）。"""
+        for w in self._cal_holder.winfo_children():
+            w.destroy()
+        self._cal_holder.grid_columnconfigure(6, weight=1)
+        self._build_calendar(self._cal_holder, self._leaves_draft,
+                             self._mode_var.get())
+
     def _open_settings(self) -> None:
         dlg = self.settings_dialog
         if dlg is not None and dlg.winfo_exists():
@@ -630,11 +692,11 @@ class PayClockApp:
                            activeforeground=t["ink"],
                            command=self._on_mode_change).pack(side="left", padx=(0, 10))
 
-        # 4) 每月假期天数（含义随模式）
-        self._hol_label = row(4, "额外假期（天/月）")
-        hol_spin, self._hol_var = self._make_spin(form, [str(i) for i in range(29)],
-                                                  str(self.cfg["monthly_holidays"]), t)
-        hol_spin.grid(row=4, column=1, sticky="w")
+        # 4) 当月休假：日历多选（单击循环 计薪→调休→请假；草稿制，保存才生效）
+        self._leaves_draft = dict(self.cfg.get("leaves", {}))
+        self._cal_holder = tk.Frame(form, bg=t["dlg_bg"])
+        self._cal_holder.grid(row=4, column=0, columnspan=2, pady=(2, 6))
+        self._rebuild_calendar()
 
         # 5) 发薪日
         row(5, "发薪日（1–31）")
@@ -642,7 +704,7 @@ class PayClockApp:
                                                   str(self.cfg["payday"]), t)
         pay_spin.grid(row=5, column=1, sticky="w")
 
-        self._on_mode_change()  # 按当前模式校正假期行文案
+        self._on_mode_change()  # 校正日历禁用格（随草稿休假模式）
 
         # 弹窗为临时窗体：不进主窗口画布体系（销毁后重绘会碰死控件），
         # 打开时按当前主题 token 静态上色
@@ -662,9 +724,7 @@ class PayClockApp:
         dlg.geometry(f"+{x}+{y}")
 
     def _on_mode_change(self) -> None:
-        self._hol_label.configure(
-            text="自由假期（天/月，用菜单逐日标记）"
-            if self._mode_var.get() == "free" else "周末外额外假期（天/月）")
+        self._rebuild_calendar()
 
     def _on_save(self, dlg: tk.Toplevel) -> None:
         raw = self._salary_var.get().strip()
@@ -677,19 +737,21 @@ class PayClockApp:
                     raise ValueError
             ws = f"{int(self._ws_h.get()):02d}:{int(self._ws_m.get()):02d}"
             we = f"{int(self._we_h.get()):02d}:{int(self._we_m.get()):02d}"
-            holidays = int(self._hol_var.get())
             payday = int(self._pay_var.get())
         except ValueError:
             self._dlg_status.configure(text="保存失败：请检查月薪与各项数值")
             return
         mode = self._mode_var.get()
-        errors = money.validate(salary, ws, we, holidays, payday, mode)
+        prefix = datetime.now().strftime("%Y-%m-")
+        leaves = {k: v for k, v in self._leaves_draft.items()
+                  if isinstance(k, str) and k.startswith(prefix)}
+        errors = money.validate(salary, ws, we, leaves, payday, mode)
         if errors:
             self._dlg_status.configure(text="保存失败：" + "；".join(errors))
             return
         candidate = {**self.cfg, "monthly_salary": salary, "work_start": ws,
-                     "work_end": we, "holiday_mode": mode,
-                     "monthly_holidays": holidays, "payday": payday}
+                     "work_end": we, "holiday_mode": mode, "leaves": leaves,
+                     "payday": payday}
         if not save_config(candidate):  # 先落盘，成功才提交内存（修复 A）
             self._dlg_status.configure(text="保存失败：config.json 写入失败")
             return
