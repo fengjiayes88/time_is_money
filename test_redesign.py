@@ -30,6 +30,11 @@ def check_bake():
         avgs[theme] = sum((i % 256) * n for i, n in enumerate(hist)) \
             / (size[0] * size[1] * 3)
     assert avgs["midnight"] < avgs["glass"] < avgs["paper"], avgs
+    # fast 管线（拖动实时预览）：输出尺寸必须等于目标全尺寸
+    for theme in ("midnight", "paper"):
+        img_f = Image.open(io.BytesIO(
+            make_bg.bake_glass(src, size, panels, theme, fast=True))).convert("RGB")
+        assert img_f.size == size, (theme, "fast", img_f.size)
     print("bake OK", {k: round(v) for k, v in avgs.items()})
 
 

@@ -24,6 +24,7 @@ import ctypes.wintypes
 import json
 import math
 import os
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 import tkinter.messagebox
@@ -47,6 +48,8 @@ DEFAULT_CONFIG = {
 
 CONFIG_FILENAME = "config.json"
 TICK_MS = 1000
+LIVE_BAKE_MS = 120      # 拖动中实时重烘焙节流间隔：背景以 ≤120ms 延迟跟手
+FAST_BAKE_AREA = 350_000  # 实时烘焙像素面积超过此值时走 1/3 快速管线（控制单次阻塞）
 
 # ---- 窗口与布局 ----
 # 默认尺寸为旧版 520×680 的 2/3；窗口可任意拖拽缩放，背景毛玻璃随尺寸实时重烘焙
@@ -228,6 +231,7 @@ class PayClockApp:
         self._win_h = DEFAULT_WIN_H
         self._bg_size = (0, 0)         # 已烘焙背景对应的窗口尺寸
         self._resize_after = None      # 缩放防抖定时器
+        self._last_live_bake = 0.0     # 上次拖动中实时烘焙的时刻（monotonic 秒）
         self._rgn_size = (0, 0)        # 已应用圆角区域对应的窗口尺寸
         self._can_resize_bg = False    # Pillow 可用时才开任意缩放（构建 UI 前探测）
         self._menu_bar = None          # 菜单引用（_restyle_menu 用，None 守卫）
@@ -362,8 +366,11 @@ class PayClockApp:
                 self._win_w, self._win_h = self._bg_size
                 self.root.geometry(f"{self._win_w}x{self._win_h}")  # 跟随预生成背景尺寸
 
-    def _rebake_background(self) -> None:
-        """按当前窗口尺寸烘焙背景（主壁纸/加班壁纸随模式切换），后重绘内容。"""
+    def _rebake_background(self, fast: bool = False) -> None:
+        """按当前窗口尺寸烘焙背景（主壁纸/加班壁纸随模式切换），后重绘内容。
+
+        fast=True 用 1/3 快速管线（拖动中实时预览），停稳后用全质量重烘。
+        """
         if not self._can_resize_bg:
             return  # 无 Pillow：固定尺寸回退，不烘焙
         w = max(MIN_WIN_W, self.canvas.winfo_width()) if self.canvas.winfo_ismapped() \
@@ -379,7 +386,7 @@ class PayClockApp:
                 data = make_bg.bake_dark(src, (w, h))
             else:
                 data = make_bg.bake_glass(src, (w, h), [lay["main"], lay["stats"]],
-                                          self._theme_key())
+                                          self._theme_key(), fast=fast)
             self._bg_photo = tk.PhotoImage(data=base64.b64encode(data))
             self._bg_size = (w, h)
         except Exception:
@@ -405,14 +412,17 @@ class PayClockApp:
         h = max(MIN_WIN_H, event.height)
         if (w, h) == (self._win_w, self._win_h):
             return
-        # ② 文字布局立即跟随（轻量），背景重烘焙防抖后执行（重量）
+        # ② 文字布局立即跟随（轻量）；背景：拖动中每 LIVE_BAKE_MS 节流实时烘焙
+        #    一次（大窗口自动切快速管线），停稳 150ms 后全质量重烘收尾
         self._win_w, self._win_h = w, h
         self._rerender()
         self._update_display(datetime.now())
-        if (event.width, event.height) == self._bg_size:
-            return
         if self._resize_after is not None:
             self.root.after_cancel(self._resize_after)
+        now = time.monotonic()
+        if (now - self._last_live_bake) * 1000 >= LIVE_BAKE_MS:
+            self._last_live_bake = now
+            self._rebake_background(fast=w * h > FAST_BAKE_AREA)
         self._resize_after = self.root.after(150, self._after_resize)
 
     def _after_resize(self) -> None:

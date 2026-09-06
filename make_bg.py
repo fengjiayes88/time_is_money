@@ -75,44 +75,61 @@ def _band_scrims(img: Image.Image, alpha: int) -> None:
               overlay.resize((w, h)))
 
 
-def _paste_panel(base: Image.Image, glass: Image.Image, box, p: dict) -> None:
+def _paste_panel(base: Image.Image, glass: Image.Image, box, p: dict,
+                 radius: int = RADIUS) -> None:
     mask = Image.new("L", base.size, 0)
-    ImageDraw.Draw(mask).rounded_rectangle(box, radius=RADIUS, fill=255)
+    ImageDraw.Draw(mask).rounded_rectangle(box, radius=radius, fill=255)
     if "shadow_alpha" in p:  # paper：面板下柔和投影
         sh = Image.new("L", base.size, 0)
         ImageDraw.Draw(sh).rounded_rectangle(
-            (box[0], box[1] + 6, box[2], box[3] + 6), radius=RADIUS, fill=p["shadow_alpha"])
+            (box[0], box[1] + 6, box[2], box[3] + 6), radius=radius, fill=p["shadow_alpha"])
         sh = sh.filter(ImageFilter.GaussianBlur(12))
         base.paste(Image.new("RGB", base.size, (20, 24, 34)), (0, 0), sh)
     base.paste(glass, (0, 0), mask)
     d = ImageDraw.Draw(base)
-    d.rounded_rectangle(box, radius=RADIUS, outline=p["edge"], width=1)
-    if "hilite" in p:  # 上缘内高光（x 两端内收 RADIUS，y = 面板顶 +2）
-        d.line((box[0] + RADIUS, box[1] + 2, box[2] - RADIUS, box[1] + 2),
+    d.rounded_rectangle(box, radius=radius, outline=p["edge"], width=1)
+    if "hilite" in p:  # 上缘内高光（x 两端内收 radius，y = 面板顶 +2）
+        d.line((box[0] + radius, box[1] + 2, box[2] - radius, box[1] + 2),
                fill=p["hilite"], width=1)
 
 
 def bake_glass(src: str, size: tuple[int, int],
                panels: list[tuple[int, int, int, int]],
-               theme: str = "glass") -> bytes:
-    """主界面背景：按主题烘焙三套材质之一。"""
+               theme: str = "glass", fast: bool = False) -> bytes:
+    """主界面背景：按主题烘焙三套材质之一。
+
+    fast=True 走 1/3 线性尺度快速管线（拖动实时预览用），结果双线性放大、
+    1px 描边在全尺寸补画；停稳后的全质量烘焙用默认 fast=False。
+    """
+    w, h = size
+    S = 3 if fast else 1
+    if S > 1:
+        size = (max(RADIUS, w // S), max(RADIUS, h // S))
+        panels = [(x0 // S, y0 // S, x1 // S, y1 // S) for x0, y0, x1, y1 in panels]
     p = THEME_BAKE[theme]
     base = _fit(src, size)
     if theme == "midnight":
         base = ImageEnhance.Brightness(base).enhance(p["brightness"])
         _radial_vignette(base, p["vignette_alpha"])
-        glass = base.filter(ImageFilter.GaussianBlur(p["panel_blur"]))
+        glass = base.filter(ImageFilter.GaussianBlur(max(2, p["panel_blur"] // S)))
     elif theme == "paper":
-        base = base.filter(ImageFilter.GaussianBlur(p["blur"]))
+        base = base.filter(ImageFilter.GaussianBlur(max(2, p["blur"] // S)))
         base = Image.blend(base, Image.new("RGB", size, (255, 255, 255)), p["wash"])
         glass = base
     else:  # glass
         _band_scrims(base, p["top_bottom_alpha"])
-        glass = base.filter(ImageFilter.GaussianBlur(p["panel_blur"]))
+        glass = base.filter(ImageFilter.GaussianBlur(max(2, p["panel_blur"] // S)))
     glass = Image.blend(glass, Image.new("RGB", size, p["tint"]),
                         p["tint_alpha"] / 255)
+    radius = max(4, RADIUS // S)
     for box in panels:
-        _paste_panel(base, glass, box, p)
+        _paste_panel(base, glass, box, p, radius)
+    if S > 1:
+        base = base.resize((w, h), Image.BILINEAR)
+        d = ImageDraw.Draw(base)  # 1px 描边在全尺寸补画，避免放大发虚
+        for x0, y0, x1, y1 in panels:
+            d.rounded_rectangle((x0, y0, x1, y1), radius=RADIUS,
+                                outline=p["edge"], width=1)
     return _png_bytes(base)
 
 
