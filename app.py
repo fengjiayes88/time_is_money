@@ -239,6 +239,7 @@ class PayClockApp:
         self._win_h = DEFAULT_WIN_H
         self._bg_size = (0, 0)         # 已烘焙背景对应的窗口尺寸
         self._resize_after = None      # 缩放防抖定时器
+        self._status_after = None      # 状态行自动清除定时器
         self._last_live_bake = 0.0     # 上次拖动中实时烘焙的时刻（monotonic 秒）
         self._rgn_size = (0, 0)        # 已应用圆角区域对应的窗口尺寸
         self._can_resize_bg = False    # Pillow 可用时才开任意缩放（构建 UI 前探测）
@@ -260,7 +261,7 @@ class PayClockApp:
         self._update_display(datetime.now())
         self._apply_window_chrome(initial=True)
         if load_warning:
-            self._set_status(load_warning)
+            self._set_status(load_warning, clear_ms=0)
         self.root.after(TICK_MS, self._tick)
 
     # ---------------- 顶部菜单栏（苹果风：拍平到顶栏，配色随主题 token）----------------
@@ -346,7 +347,7 @@ class PayClockApp:
             self._set_status("标记失败：本月应出勤天数已用尽")
             return
         if not save_config(candidate):
-            self._set_status("警告：config.json 写入失败")
+            self._set_status("警告：config.json 写入失败", clear_ms=0)
             return
         self.cfg.update(candidate)
         self._refresh_month_cache(datetime.now())
@@ -362,7 +363,7 @@ class PayClockApp:
         candidate = {**self.cfg,
                      "leaves": {k: v for k, v in self.cfg["leaves"].items() if k != key}}
         if not save_config(candidate):
-            self._set_status("警告：config.json 写入失败")
+            self._set_status("警告：config.json 写入失败", clear_ms=0)
             return
         self.cfg.update(candidate)
         self._refresh_month_cache(datetime.now())
@@ -776,7 +777,7 @@ class PayClockApp:
             return
         self.cfg["theme"] = key
         if not save_config(self.cfg):  # 主题即时持久化
-            self._set_status("警告：config.json 写入失败，主题未持久化")
+            self._set_status("警告：config.json 写入失败，主题未持久化", clear_ms=0)
         self._restyle_menu()  # 菜单栏跟随新主题
         if self.overtime_start is None:
             if self._can_resize_bg:
@@ -892,7 +893,7 @@ class PayClockApp:
         if self.cfg.get("last_asked_date") != today_str:
             self.cfg["last_asked_date"] = today_str
             if not save_config(self.cfg):
-                self._set_status("警告：config.json 写入失败")
+                self._set_status("警告：config.json 写入失败", clear_ms=0)
 
     def _play_alert(self) -> None:
         try:
@@ -961,9 +962,20 @@ class PayClockApp:
 
     # ---------------- 状态条 ----------------
 
-    def _set_status(self, text: str) -> None:
-        if self.overtime_start is None:  # 加班画布无状态行，静默跳过
-            self.canvas.itemconfigure("status", text=text)
+    def _set_status(self, text: str, clear_ms: int = 3000) -> None:
+        """状态行提示：默认 3 秒后自动消失；clear_ms=0 常驻（警告类）直到被替换。"""
+        if self.overtime_start is not None:  # 加班画布无状态行，静默跳过
+            return
+        if self._status_after is not None:
+            self.root.after_cancel(self._status_after)
+            self._status_after = None
+        self.canvas.itemconfigure("status", text=text)
+        if clear_ms:
+            self._status_after = self.root.after(clear_ms, self._clear_status)
+
+    def _clear_status(self) -> None:
+        self._status_after = None
+        self.canvas.itemconfigure("status", text="")
 
 
 def _acquire_single_instance_lock() -> bool:
