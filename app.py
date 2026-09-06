@@ -418,7 +418,7 @@ class PayClockApp:
         self._rebake_background()
 
     def _theme_key(self) -> str:
-        """当前主题键（非法值回退 midnight，与 load_config 兑底一致）。"""
+        """当前主题键（非法值回退 midnight，与 load_config 兕底一致）。"""
         key = self.cfg["theme"]
         return key if key in THEMES else "midnight"
 

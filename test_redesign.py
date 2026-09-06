@@ -56,7 +56,36 @@ def check_migration():
     print("migration OK")
 
 
+def check_theme_key():
+    """_theme_key() 直接断言：合法键透传，任意非法字符串/None 回退 midnight。
+
+    仅读 self.cfg["theme"]，用桩对象免建 Tk 实例。入参不变式由 load_config
+    归一化保证（不可哈希 JSON 值已在 migration 检查中覆盖，不进本契约）。
+    """
+    import app
+
+    class _Stub:
+        cfg = {}
+
+    stub = _Stub()
+    cases = (
+        ("midnight", "midnight"),
+        ("paper", "paper"),
+        ("glass", "glass"),
+        ("mint", "midnight"),   # 旧键在运行期不再映射（仅 load_config 迁移）
+        ("nope", "midnight"),
+        (None, "midnight"),
+        ("", "midnight"),
+    )
+    for value, want in cases:
+        stub.cfg["theme"] = value
+        got = app.PayClockApp._theme_key(stub)
+        assert got == want, (value, got, want)
+    print("theme_key OK")
+
+
 if __name__ == "__main__":
     check_migration()
+    check_theme_key()
     check_bake()
     print("ALL OK")
