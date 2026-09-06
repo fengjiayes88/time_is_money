@@ -48,6 +48,11 @@ def check_migration():
             json.dump(base, fh)
         cfg, _ = app.load_config(p)
         assert cfg["theme"] == "midnight", cfg["theme"]
+        base["theme"] = ["midnight"]  # 不可哈希 JSON 值：应回退 midnight 而非 TypeError 穿透
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump(base, fh)
+        cfg, _ = app.load_config(p)
+        assert cfg["theme"] == "midnight", cfg["theme"]
     print("migration OK")
 
 

@@ -50,7 +50,7 @@ TICK_MS = 1000
 
 # ---- 窗口与布局 ----
 # 默认尺寸为旧版 520×680 的 2/3；窗口可任意拖拽缩放，背景毛玻璃随尺寸实时重烘焙
-# （需 Pillow，未安装时回退固定尺寸 + 预生成 assets/bg.png）。布局全部按比例计算。
+# （需 Pillow，未安装时回退固定尺寸 + 预生成 assets/bg_<theme>.png）。布局全部按比例计算。
 DEFAULT_WIN_W, DEFAULT_WIN_H = 348, 452
 MIN_WIN_W, MIN_WIN_H = 300, 400
 WALLPAPER = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -125,14 +125,6 @@ THEMES = {
 LEGACY_THEME = {"mint": "glass", "amber": "glass", "sky": "glass"}  # 旧强调色 → 观感最接近
 MODE_LABELS = {"weekend": "固定周末公休", "free": "自由假期（当月任选）"}
 
-INK = "#1D1D1F"                  # 主文字（苹果深灰墨色）
-LABEL_INK = "#3F3F46"            # 标签文字（玻璃透明后需更深才可读）
-SUB = "#6E6E73"                  # 次要文字
-DLG_BG = "#F5F5F7"               # 弹窗/菜单底色（苹果浅灰）
-LINE = "#D2D2D7"                 # 输入框描边
-BLUE = "#0A84FF"                 # 系统蓝（主按钮/菜单高亮）
-MENU_DISABLED = "#B0B0B5"        # 菜单禁用项文字色
-GLASS_FALLBACK = "#F7F8FA"       # 缺背景资源时的面板兜底色
 EXPLOIT_BG = "#0D0D0D"
 EXPLOIT_FG = "#FF5252"
 EXPLOIT_HIGHLIGHT = "#FF1744"
@@ -193,6 +185,7 @@ def load_config(path: str | None = None) -> tuple[dict, str]:
                           loaded["work_end"], loaded["monthly_holidays"],
                           loaded["payday"], loaded["holiday_mode"]):
             raise ValueError("config fields failed money.validate")
+        loaded["theme"] = str(loaded["theme"])  # 防不可哈希 JSON 值在下方查找中抛 TypeError
         loaded["theme"] = LEGACY_THEME.get(loaded["theme"], loaded["theme"])
         if loaded["theme"] not in THEMES:
             loaded["theme"] = "midnight"
@@ -237,6 +230,9 @@ class PayClockApp:
         self._resize_after = None      # 缩放防抖定时器
         self._rgn_size = (0, 0)        # 已应用圆角区域对应的窗口尺寸
         self._can_resize_bg = False    # Pillow 可用时才开任意缩放（构建 UI 前探测）
+        self._menu_bar = None          # 菜单引用（_restyle_menu 用，None 守卫）
+        self._menu_set = None
+        self._theme_menu = None
         # 等宽字体探测（Consolas → Cascadia Mono → Courier New，按系统可用性回退）
         fams = set(tkfont.families(root))
         self._mono = ("Consolas" if "Consolas" in fams
@@ -254,19 +250,15 @@ class PayClockApp:
             self._set_status(load_warning)
         self.root.after(TICK_MS, self._tick)
 
-    # ---------------- 顶部菜单栏（苹果风：拍平到顶栏，浅灰底/蓝色高亮）----------------
+    # ---------------- 顶部菜单栏（苹果风：拍平到顶栏，配色随主题 token）----------------
 
     def _build_menu(self) -> None:
         menu_font = ("Microsoft YaHei UI", 10)
-        t = self._tokens()  # 菜单静态上色（主题切换时的换肤在 _restyle_menu，任务 4）
 
         def apple_menu(master):
-            """苹果风菜单：token 取色、去内边框。"""
-            return tk.Menu(master, tearoff=0, bg=t["menu_bg"], fg=t["menu_fg"], font=menu_font,
-                           activebackground=t["menu_active_bg"],
-                           activeforeground=t["menu_active_fg"],
-                           activeborderwidth=0, bd=0, relief="flat",
-                           disabledforeground=t["menu_disabled"])
+            """苹果风菜单骨架：颜色统一由 _restyle_menu 按主题上色。"""
+            return tk.Menu(master, tearoff=0, font=menu_font,
+                           activeborderwidth=0, bd=0, relief="flat")
 
         menubar = apple_menu(self.root)
         m_set = apple_menu(menubar)
@@ -274,8 +266,7 @@ class PayClockApp:
         menubar.add_cascade(label="设置", menu=m_set)
 
         m_theme = apple_menu(menubar)
-        self.theme_var = tk.StringVar(
-            value=self.cfg["theme"] if self.cfg["theme"] in THEMES else "midnight")
+        self.theme_var = tk.StringVar(value=self._theme_key())
         for key in THEMES:
             m_theme.add_radiobutton(label=THEMES[key]["label"], value=key,
                                     variable=self.theme_var,
@@ -290,6 +281,7 @@ class PayClockApp:
         self._holiday_idx = menubar.index("end")
         self._menu_bar = menubar
         self.root.configure(menu=menubar)
+        self._restyle_menu()
         self._update_holiday_menu()
 
     def _update_holiday_menu(self) -> None:
@@ -356,7 +348,8 @@ class PayClockApp:
         self.root.minsize(MIN_WIN_W, MIN_WIN_H)
 
         self.canvas = tk.Canvas(self.root, width=DEFAULT_WIN_W,
-                                height=DEFAULT_WIN_H, bg=DLG_BG,
+                                height=DEFAULT_WIN_H,
+                                bg=self._tokens()["dlg_bg"],
                                 highlightthickness=0, bd=0)
         self.canvas.pack(fill="both", expand=True)
         if self._can_resize_bg:  # 窗口缩放 → 防抖后按新尺寸重烘焙背景与布局
@@ -386,7 +379,7 @@ class PayClockApp:
                 data = make_bg.bake_dark(src, (w, h))
             else:
                 data = make_bg.bake_glass(src, (w, h), [lay["main"], lay["stats"]],
-                                          self.cfg["theme"] if self.cfg["theme"] in THEMES else "midnight")
+                                          self._theme_key())
             self._bg_photo = tk.PhotoImage(data=base64.b64encode(data))
             self._bg_size = (w, h)
         except Exception:
@@ -396,7 +389,7 @@ class PayClockApp:
 
     def _reload_fallback_bg(self) -> None:
         """无 Pillow 回退：按主题重载预烘焙背景。"""
-        key = self.cfg["theme"] if self.cfg["theme"] in THEMES else "midnight"
+        key = self._theme_key()
         bg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "assets", f"bg_{key}.png")
         if os.path.exists(bg_path):
@@ -424,9 +417,23 @@ class PayClockApp:
         self._resize_after = None
         self._rebake_background()
 
+    def _theme_key(self) -> str:
+        """当前主题键（非法值回退 midnight，与 load_config 兑底一致）。"""
+        key = self.cfg["theme"]
+        return key if key in THEMES else "midnight"
+
     def _tokens(self) -> dict:
-        key = self.cfg["theme"] if self.cfg["theme"] in THEMES else "midnight"
-        return THEMES[key]
+        return THEMES[self._theme_key()]
+
+    def _restyle_menu(self) -> None:
+        """菜单栏/子菜单按当前主题换肤（构建后与主题切换时各调一次）。"""
+        t = self._tokens()
+        for m in (self._menu_bar, self._menu_set, self._theme_menu):
+            if m is not None:
+                m.configure(bg=t["menu_bg"], fg=t["menu_fg"],
+                            activebackground=t["menu_active_bg"],
+                            activeforeground=t["menu_active_fg"],
+                            disabledforeground=t["menu_disabled"])
 
     def _rerender(self) -> None:
         """按当前状态（常规/加班）重建画布内容；主题切换后也走这里。"""
@@ -484,8 +491,8 @@ class PayClockApp:
     # ---------------- 设置弹窗 ----------------
 
     @staticmethod
-    def _make_spin(parent, values: list[str], value: str, width: int = 4):
-        """只读循环 Spinbox 选择器（时间/天数/日期通用）。
+    def _make_spin(parent, values: list[str], value: str, t: dict, width: int = 4):
+        """只读循环 Spinbox 选择器（时间/天数/日期通用），颜色取主题 token。
 
         注意：values 选项会在创建时重置 textvariable，
         必须先创建、后绑变量、再回设初值。
@@ -493,23 +500,25 @@ class PayClockApp:
         var = tk.StringVar()
         spin = tk.Spinbox(parent, values=values, wrap=True, width=width,
                           state="readonly", font=FONT_APP, justify="center",
-                          bg="#FFFFFF", fg=INK, insertbackground=INK,
-                          buttonbackground="#E9E9EB", relief="flat",
-                          highlightthickness=1, highlightbackground=LINE,
-                          highlightcolor=BLUE)
+                          bg=t["field_bg"], fg=t["field_fg"],
+                          insertbackground=t["field_fg"],
+                          buttonbackground=t["btn2_bg"], relief="flat",
+                          highlightthickness=1, highlightbackground=t["line"],
+                          highlightcolor=t["accent"])
         spin.configure(textvariable=var)
         var.set(value)
         return spin, var
 
-    def _time_picker(self, parent, hh: int, mm: int, bg: str = DLG_BG):
+    def _time_picker(self, parent, hh: int, mm: int, t: dict):
         """HH:MM 时间选择控件：两个只读 Spinbox（00–23 / 00–59，循环）。"""
-        box = tk.Frame(parent, bg=bg)
+        box = tk.Frame(parent, bg=t["dlg_bg"])
         h_spin, hv = self._make_spin(box, [f"{i:02d}" for i in range(24)],
-                                     f"{hh:02d}", 3)
+                                     f"{hh:02d}", t, 3)
         h_spin.pack(side="left")
-        tk.Label(box, text=" : ", font=("Microsoft YaHei UI", 11, "bold"), bg=bg, fg=SUB).pack(side="left")
+        tk.Label(box, text=" : ", font=("Microsoft YaHei UI", 11, "bold"),
+                 bg=t["dlg_bg"], fg=t["sub"]).pack(side="left")
         m_spin, mv = self._make_spin(box, [f"{i:02d}" for i in range(60)],
-                                     f"{mm:02d}", 3)
+                                     f"{mm:02d}", t, 3)
         m_spin.pack(side="left")
         return box, hv, mv
 
@@ -524,83 +533,86 @@ class PayClockApp:
         self.settings_dialog = dlg
         dlg.title("设置")
         dlg.resizable(False, False)
-        dlg.configure(bg=DLG_BG)
+        t = self._tokens()  # 弹窗随打开时的当前主题上色
+        dlg.configure(bg=t["dlg_bg"])
         dlg.transient(self.root)
         dlg.grab_set()  # 设置弹窗模态；after 循环不受影响（R1 只禁线程）
 
-        form = tk.Frame(dlg, padx=16, pady=10, bg=DLG_BG)
+        form = tk.Frame(dlg, padx=16, pady=10, bg=t["dlg_bg"])
         form.pack()
         form.columnconfigure(1, weight=1)
 
         def row(r, text):
             lab = tk.Label(form, text=text, font=FONT_APP, anchor="w",
-                           bg=DLG_BG, fg=INK)
+                           bg=t["dlg_bg"], fg=t["ink"])
             lab.grid(row=r, column=0, sticky="w", padx=(0, 10), pady=5)
             return lab
 
         # 1) 月薪（机密）：默认 • 掩码，勾选「显示」临时查看；留空 = 保持不变
         row(0, "月薪（元/月）")
-        salary_cell = tk.Frame(form, bg=DLG_BG)
+        salary_cell = tk.Frame(form, bg=t["dlg_bg"])
         salary_cell.grid(row=0, column=1, sticky="w")
         self._salary_var = tk.StringVar(value=str(self.cfg["monthly_salary"]))
         self._salary_entry = tk.Entry(salary_cell, textvariable=self._salary_var,
                                       show="•", font=FONT_APP, width=12,
-                                      bg="#FFFFFF", fg=INK, insertbackground=INK,
+                                      bg=t["field_bg"], fg=t["field_fg"],
+                                      insertbackground=t["field_fg"],
                                       relief="flat", highlightthickness=1,
-                                      highlightbackground=LINE, highlightcolor=BLUE)
+                                      highlightbackground=t["line"],
+                                      highlightcolor=t["accent"])
         self._salary_entry.pack(side="left")
         show_var = tk.BooleanVar(value=False)
         tk.Checkbutton(salary_cell, text="显示", variable=show_var,
-                       font=FONT_APP_SMALL, bg=DLG_BG, fg=SUB,
-                       activebackground=DLG_BG, activeforeground=SUB,
+                       font=FONT_APP_SMALL, bg=t["dlg_bg"], fg=t["sub"],
+                       activebackground=t["dlg_bg"], activeforeground=t["sub"],
                        command=lambda: self._salary_entry.configure(
                            show="" if show_var.get() else "•")).pack(side="left", padx=6)
 
         # 2) 上下班时间：时间选择控件
         row(1, "上班开始")
         ws_box, self._ws_h, self._ws_m = self._time_picker(
-            form, int(self.cfg["work_start"][:2]), int(self.cfg["work_start"][3:]))
+            form, int(self.cfg["work_start"][:2]), int(self.cfg["work_start"][3:]), t)
         ws_box.grid(row=1, column=1, sticky="w")
         row(2, "上班结束")
         we_box, self._we_h, self._we_m = self._time_picker(
-            form, int(self.cfg["work_end"][:2]), int(self.cfg["work_end"][3:]))
+            form, int(self.cfg["work_end"][:2]), int(self.cfg["work_end"][3:]), t)
         we_box.grid(row=2, column=1, sticky="w")
 
         # 3) 休假模式：固定周末公休（默认）/ 自由假期
         row(3, "休假方式")
-        mode_cell = tk.Frame(form, bg=DLG_BG)
+        mode_cell = tk.Frame(form, bg=t["dlg_bg"])
         mode_cell.grid(row=3, column=1, sticky="w")
         self._mode_var = tk.StringVar(value=self.cfg["holiday_mode"])
         for key in ("weekend", "free"):
             tk.Radiobutton(mode_cell, text=MODE_LABELS[key], value=key,
                            variable=self._mode_var, font=FONT_APP,
-                           bg=DLG_BG, fg=INK, activebackground=DLG_BG,
-                           activeforeground=INK,
+                           bg=t["dlg_bg"], fg=t["ink"], activebackground=t["dlg_bg"],
+                           activeforeground=t["ink"],
                            command=self._on_mode_change).pack(side="left", padx=(0, 10))
 
         # 4) 每月假期天数（含义随模式）
         self._hol_label = row(4, "额外假期（天/月）")
         hol_spin, self._hol_var = self._make_spin(form, [str(i) for i in range(29)],
-                                                  str(self.cfg["monthly_holidays"]))
+                                                  str(self.cfg["monthly_holidays"]), t)
         hol_spin.grid(row=4, column=1, sticky="w")
 
         # 5) 发薪日
         row(5, "发薪日（1–31）")
         pay_spin, self._pay_var = self._make_spin(form, [str(i) for i in range(1, 32)],
-                                                  str(self.cfg["payday"]))
+                                                  str(self.cfg["payday"]), t)
         pay_spin.grid(row=5, column=1, sticky="w")
 
         self._on_mode_change()  # 按当前模式校正假期行文案
 
         # 弹窗为临时窗体：不进主窗口画布体系（销毁后重绘会碰死控件），
-        # 创建时按系统蓝静态上色
+        # 打开时按当前主题 token 静态上色
         tk.Button(form, text="保存设置", command=lambda: self._on_save(dlg),
                   font=("Microsoft YaHei UI", 12, "bold"), bd=0, padx=18, pady=6, cursor="hand2",
-                  bg=BLUE, fg="#FFFFFF", activebackground="#3395FF",
-                  activeforeground="#FFFFFF", relief="flat") \
+                  bg=t["btn_bg"], fg=t["btn_fg"], activebackground=t["btn_active"],
+                  activeforeground=t["btn_fg"], relief="flat") \
             .grid(row=6, column=0, columnspan=2, pady=(12, 2))
-        dlg_status = tk.Label(dlg, text="", font=FONT_APP_SMALL, fg="#E02D2D",
-                              bg=DLG_BG)
+        dlg_status = tk.Label(dlg, text="", font=FONT_APP_SMALL, fg=t["err"],
+                              bg=t["dlg_bg"])
         dlg_status.pack(pady=(0, 8))
         self._dlg_status = dlg_status
 
@@ -658,6 +670,7 @@ class PayClockApp:
         self.cfg["theme"] = key
         if not save_config(self.cfg):  # 主题即时持久化
             self._set_status("警告：config.json 写入失败，主题未持久化")
+        self._restyle_menu()  # 菜单栏跟随新主题
         if self.overtime_start is None:
             if self._can_resize_bg:
                 self._rebake_background()  # 材质随主题变，按主题重烘焙（内部含重绘+刷新）
@@ -777,28 +790,29 @@ class PayClockApp:
                 pass
 
     def _open_ask_dialog(self) -> None:
+        t = self._tokens()
         dlg = tk.Toplevel(self.root)
         self.ask_dialog = dlg
         dlg.title("下班提醒")
         dlg.resizable(False, False)
-        dlg.configure(bg="#FFFFFF")
+        dlg.configure(bg=t["dlg_bg"])
         dlg.transient(self.root)  # 仅窗口归属，不 grab：保持非模态，tick 不停（R1）
         dlg.protocol("WM_DELETE_WINDOW", self._on_ask_dismissed)
 
         msg = tk.Label(dlg, text="到点啦，今天加班吗？", font=("Microsoft YaHei UI", 14, "bold"),
-                       bg="#FFFFFF", fg=INK, padx=28, pady=18)
+                       bg=t["dlg_bg"], fg=t["ink"], padx=28, pady=18)
         msg.pack()
-        btns = tk.Frame(dlg, bg="#FFFFFF")
+        btns = tk.Frame(dlg, bg=t["dlg_bg"])
         btns.pack(pady=(0, 20), padx=24)
         yes = tk.Button(btns, text="加班", font=("Microsoft YaHei UI", 12, "bold"), bd=0, padx=22,
                         pady=6, cursor="hand2", relief="flat",
-                        bg=BLUE, fg="#FFFFFF", activebackground="#3395FF",
-                        activeforeground="#FFFFFF",
+                        bg=t["btn_bg"], fg=t["btn_fg"], activebackground=t["btn_active"],
+                        activeforeground=t["btn_fg"],
                         command=self._on_accept_overtime)
         no = tk.Button(btns, text="不加班", font=("Microsoft YaHei UI", 12, "bold"), bd=0, padx=22,
                        pady=6, cursor="hand2", relief="flat",
-                       bg="#E9E9EB", fg=INK, activebackground="#DCDCE0",
-                       activeforeground=INK,
+                       bg=t["btn2_bg"], fg=t["btn2_fg"], activebackground=t["btn2_bg"],
+                       activeforeground=t["btn2_fg"],
                        command=self._on_ask_dismissed)
         yes.pack(side="left", padx=8)
         no.pack(side="left", padx=8)
