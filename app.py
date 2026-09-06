@@ -18,7 +18,6 @@
 config.json 固定位于本脚本目录、与 CWD 无关（A12）。
 """
 
-import base64
 import ctypes
 import ctypes.wintypes
 import json
@@ -49,7 +48,7 @@ DEFAULT_CONFIG = {
 CONFIG_FILENAME = "config.json"
 TICK_MS = 1000
 LIVE_BAKE_MS = 120      # 拖动中实时重烘焙节流间隔：背景以 ≤120ms 延迟跟手
-FAST_BAKE_AREA = 350_000  # 实时烘焙像素面积超过此值时走 1/3 快速管线（控制单次阻塞）
+# 实时烘焙一律走 1/3 快速管线（~20ms，拖动中不卡主线程）；停稳后全质量重烘
 
 # ---- 窗口与布局 ----
 # 默认尺寸为旧版 520×680 的 2/3；窗口可任意拖拽缩放，背景毛玻璃随尺寸实时重烘焙
@@ -383,11 +382,12 @@ class PayClockApp:
             src = WALLPAPER_EXPLOIT if self.overtime_start is not None else WALLPAPER
             lay = compute_layout(w, h)
             if self.overtime_start is not None:
-                data = make_bg.bake_dark(src, (w, h))
+                data = make_bg.bake_dark(src, (w, h), fmt="PPM")
             else:
                 data = make_bg.bake_glass(src, (w, h), [lay["main"], lay["stats"]],
-                                          self._theme_key(), fast=fast)
-            self._bg_photo = tk.PhotoImage(data=base64.b64encode(data))
+                                          self._theme_key(), fast=fast, fmt="PPM")
+            # PPM 无压缩 + 原始字节直传（免 base64）：tk 解码比 PNG 快一个量级
+            self._bg_photo = tk.PhotoImage(data=data.decode("latin-1"))
             self._bg_size = (w, h)
         except Exception:
             return  # 烘焙失败保留旧背景，不影响功能
@@ -422,7 +422,7 @@ class PayClockApp:
         now = time.monotonic()
         if (now - self._last_live_bake) * 1000 >= LIVE_BAKE_MS:
             self._last_live_bake = now
-            self._rebake_background(fast=w * h > FAST_BAKE_AREA)
+            self._rebake_background(fast=True)
         self._resize_after = self.root.after(150, self._after_resize)
 
     def _after_resize(self) -> None:

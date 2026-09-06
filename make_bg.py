@@ -34,15 +34,31 @@ THEME_BAKE = {
 RADIUS = 24
 
 
-def _png_bytes(img: Image.Image) -> bytes:
+def _png_bytes(img: Image.Image, fmt: str = "PNG") -> bytes:
     buf = io.BytesIO()
-    # compress_level=1：编码速度优先（实时重烘焙用），体积换速度
-    img.save(buf, format="PNG", compress_level=1)
+    if fmt == "PNG":
+        # compress_level=1：编码速度优先（实时重烘焙用），体积换速度
+        img.save(buf, format="PNG", compress_level=1)
+    else:  # PPM 无压缩：编码近似 memcpy，tk 解码也快（拖动实时烘焙用）
+        img.save(buf, format="PPM")
     return buf.getvalue()
 
 
+# 已解码壁纸缓存：JPEG 解码 ~16ms/次，拖动中每次重烘都读盘是最大浪费之一；
+# 以 (路径, mtime) 为键，换壁纸自动失效
+_SRC_CACHE: dict[str, tuple[float, Image.Image]] = {}
+
+
+def _get_src(src: str) -> Image.Image:
+    mtime = os.path.getmtime(src)
+    hit = _SRC_CACHE.get(src)
+    if hit is None or hit[0] != mtime:
+        _SRC_CACHE[src] = (mtime, Image.open(src).convert("RGB"))
+    return _SRC_CACHE[src][1]
+
+
 def _fit(src: str, size: tuple[int, int]) -> Image.Image:
-    return ImageOps.fit(Image.open(src).convert("RGB"), size)
+    return ImageOps.fit(_get_src(src), size)
 
 
 def _radial_vignette(img: Image.Image, alpha: int) -> None:
@@ -95,7 +111,8 @@ def _paste_panel(base: Image.Image, glass: Image.Image, box, p: dict,
 
 def bake_glass(src: str, size: tuple[int, int],
                panels: list[tuple[int, int, int, int]],
-               theme: str = "glass", fast: bool = False) -> bytes:
+               theme: str = "glass", fast: bool = False,
+               fmt: str = "PNG") -> bytes:
     """主界面背景：按主题烘焙三套材质之一。
 
     fast=True 走 1/3 线性尺度快速管线（拖动实时预览用），结果双线性放大、
@@ -130,14 +147,14 @@ def bake_glass(src: str, size: tuple[int, int],
         for x0, y0, x1, y1 in panels:
             d.rounded_rectangle((x0, y0, x1, y1), radius=RADIUS,
                                 outline=p["edge"], width=1)
-    return _png_bytes(base)
+    return _png_bytes(base, fmt)
 
 
-def bake_dark(src: str, size: tuple[int, int]) -> bytes:
+def bake_dark(src: str, size: tuple[int, int], fmt: str = "PNG") -> bytes:
     """加班暗黑背景：模糊压暗 + 8% 暗红（三主题通用）。"""
     base = _fit(src, size).filter(ImageFilter.GaussianBlur(10))
     base = Image.blend(base, Image.new("RGB", size, (0, 0, 0)), 0.58)
-    return _png_bytes(Image.blend(base, Image.new("RGB", size, (60, 0, 0)), 0.08))
+    return _png_bytes(Image.blend(base, Image.new("RGB", size, (60, 0, 0)), 0.08), fmt)
 
 
 def main() -> None:
