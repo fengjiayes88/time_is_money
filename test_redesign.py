@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -12,7 +13,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 def check_bake():
     try:
         import make_bg
-    except Exception:
+    except ImportError:
         print("Pillow 未安装，跳过 bake 检查")
         return
     from PIL import Image
@@ -84,8 +85,38 @@ def check_theme_key():
     print("theme_key OK")
 
 
+def check_tags_contract():
+    """渲染层与更新层的 tag 契约：_update_display/_set_status 引用的 tag 必须真实存在。"""
+    import tkinter as tk
+    import app
+    root = tk.Tk()
+    root.withdraw()
+    result = {}
+
+    def probe():
+        try:
+            appv = app.PayClockApp(root)
+            appv._update_display(datetime.now())
+            appv._set_status("selftest")  # status 初值可合理为空，先写一条再验契约
+            for tag in ("today", "sub", "sv0", "sv1", "sv2", "status"):
+                assert appv.canvas.find_withtag(tag), f"tag 缺失: {tag}"
+                assert appv.canvas.itemcget(tag, "text") != "", f"tag 内容为空: {tag}"
+            result["ok"] = True
+        except Exception as e:
+            result["err"] = e
+        finally:
+            root.destroy()
+
+    root.after(300, probe)  # 在首个 tick(1000ms) 前探针并销毁，不触发下班询问
+    root.mainloop()
+    if "err" in result:
+        raise AssertionError(f"tag 契约失败: {result['err']}")
+    print("tags contract OK")
+
+
 if __name__ == "__main__":
     check_migration()
     check_theme_key()
+    check_tags_contract()
     check_bake()
     print("ALL OK")

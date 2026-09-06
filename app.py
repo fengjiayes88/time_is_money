@@ -395,6 +395,8 @@ class PayClockApp:
         if os.path.exists(bg_path):
             self._bg_photo = tk.PhotoImage(file=bg_path)
             self._bg_size = (self._bg_photo.width(), self._bg_photo.height())
+        else:  # 主题资产缺失：清空旧主题背景走素色兜底，避免跨主题混搭
+            self._bg_photo = None
 
     def _on_canvas_configure(self, event) -> None:
         # ① 圆角区域必须随尺寸立即重设，否则最大化/拖拽后窗口被旧区域裁剪
@@ -454,18 +456,25 @@ class PayClockApp:
         else:  # 缺背景资源：素色面板兜底
             for box in (lay["main"], lay["stats"]):
                 c.create_rectangle(*box, fill=t["fallback"], outline=t["fallback"])
-        c.create_text(lay["title"], text="时间就是金钱", font=f["title"], fill=t["title"])
+        # tags 契约：_update_display/_set_status 靠 itemconfigure(tag) 每秒刷新，
+        # 这里的 tag 名必须与那两处引用严格一致（缺失 = 静默冻结在初始文本）
+        c.create_text(lay["title"], text="时间就是金钱", font=f["title"], fill=t["title"],
+                      tags="title")
         c.create_text(lay["today_label"], text="今日已赚（元）",
-                      font=f["label"], fill=t["label_ink"])
-        c.create_text(lay["today"], text="0.00", font=f["huge"], fill=t["accent"])
-        c.create_text(lay["sub"], text="", font=f["sub"], fill=t["label_ink"])
+                      font=f["label"], fill=t["label_ink"], tags="today_label")
+        c.create_text(lay["today"], text="0.00", font=f["huge"], fill=t["accent"],
+                      tags="today")
+        c.create_text(lay["sub"], text="", font=f["sub"], fill=t["label_ink"],
+                      tags="sub")
         for i, name in enumerate(("本月已赚（元）", "距发薪", "秒薪（元）")):
             c.create_text((lay["stat_xs"][i], lay["stat_label_y"]), text=name,
-                          font=f["small"], fill=t["label_ink"])
+                          font=f["small"], fill=t["label_ink"], tags=f"sl{i}")
             c.create_text((lay["stat_xs"][i], lay["stat_value_y"]), text="—",
-                          font=f["value"] if i != 1 else f["value_cjk"], fill=t["ink"])
+                          font=f["value"] if i != 1 else f["value_cjk"], fill=t["ink"],
+                          tags=f"sv{i}")
         c.create_text(lay["status"], text="", font=f["small"], fill=t["accent"],
-                      width=self._win_w - 2 * lay["margin"])  # 长警告换行，防溢出窗口
+                      width=self._win_w - 2 * lay["margin"],  # 长警告换行，防溢出窗口
+                      tags="status")
 
     def _render_exploit(self) -> None:
         c = self.canvas
