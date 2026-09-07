@@ -203,7 +203,7 @@ def load_config(path: str | None = None) -> tuple[dict, str]:
                 loaded["leaves"]["free"].update(raw)
         elif raw is not None:
             raise ValueError("bad leaves")  # 非法类型 → 沿袭 R4 整表重置
-        loaded["leaves"]["free"].update(legacy)  # 旧自由假日最后放，不覆盖已有
+        loaded["leaves"]["free"].update(legacy)  # 旧自由假日归入 free 组（同键覆盖，仅新旧混合迁移形态可达）
         if money.validate(loaded["monthly_salary"], loaded["work_start"],
                           loaded["work_end"], loaded["leaves"][loaded["holiday_mode"]],
                           loaded["payday"], loaded["holiday_mode"]):
@@ -215,7 +215,10 @@ def load_config(path: str | None = None) -> tuple[dict, str]:
         loaded["last_asked_date"] = str(loaded["last_asked_date"])
         return loaded, ""
     except (OSError, ValueError):
-        return dict(DEFAULT_CONFIG), "config.json 读取失败，已重置为默认值，请检查后重新保存"
+        # 逐层拷贝：避免异常路径返回的配置与 DEFAULT_CONFIG 共享内层 leaves 可变对象
+        cfg = dict(DEFAULT_CONFIG)
+        cfg["leaves"] = {m: dict(v) for m, v in DEFAULT_CONFIG["leaves"].items()}
+        return cfg, "config.json 读取失败，已重置为默认值，请检查后重新保存"
 
 
 def save_config(cfg: dict) -> bool:
