@@ -230,7 +230,8 @@ def validate(salary, start_hm, end_hm, leaves, payday, mode: str = "weekend",
     """
     errors: list[str] = []
 
-    if isinstance(salary, bool) or not isinstance(salary, (int, float)) or salary <= 0:
+    if isinstance(salary, bool) or not isinstance(salary, (int, float)) \
+            or not math.isfinite(salary) or salary <= 0:
         errors.append("月薪必须是大于 0 的数字")
 
     for label, hm in (("上班时间", start_hm), ("下班时间", end_hm)):
@@ -495,6 +496,8 @@ if __name__ == "__main__":
                            today=date(2023, 2, 15))) > 0,
               "validate 应对当月 D ≤ 0 返回非空")
         check(len(validate(0, "09:00", "18:00", {}, 15)) > 0, "salary=0 应报错")
+        check(len(validate(float("nan"), "09:00", "18:00", {}, 15)) > 0, "salary=NaN 应报错")
+        check(len(validate(float("inf"), "09:00", "18:00", {}, 15)) > 0, "salary=inf 应报错")
         check(len(validate(10000, "18:00", "09:00", {}, 15)) > 0, "start≥end 应报错")
         check(len(validate(10000, "09:00", "09:00", {}, 15)) > 0, "start==end 应报错")
         check(len(validate(10000, "9:00", "18:00", {}, 15)) > 0, "『9:00』格式错应报错")

@@ -204,10 +204,12 @@ def load_config(path: str | None = None) -> tuple[dict, str]:
         elif raw is not None:
             raise ValueError("bad leaves")  # 非法类型 → 沿袭 R4 整表重置
         loaded["leaves"]["free"].update(legacy)  # 旧自由假日归入 free 组（同键覆盖，仅新旧混合迁移形态可达）
-        if money.validate(loaded["monthly_salary"], loaded["work_start"],
-                          loaded["work_end"], loaded["leaves"][loaded["holiday_mode"]],
-                          loaded["payday"], loaded["holiday_mode"]):
-            raise ValueError("config fields failed money.validate")
+        # 两个模式的 leaves 都过 validate（各自 mode），非当前模式的垃圾数据同整表重置
+        for mode in ("weekend", "free"):
+            if money.validate(loaded["monthly_salary"], loaded["work_start"],
+                              loaded["work_end"], loaded["leaves"][mode],
+                              loaded["payday"], mode):
+                raise ValueError("config fields failed money.validate")
         loaded["theme"] = str(loaded["theme"])  # 防不可哈希 JSON 值在下方查找中抛 TypeError
         loaded["theme"] = LEGACY_THEME.get(loaded["theme"], loaded["theme"])
         if loaded["theme"] not in THEMES:
@@ -419,6 +421,12 @@ class PayClockApp:
         fast=True 用 1/3 快速管线（拖动中实时预览），停稳后用全质量重烘。
         """
         if not self._can_resize_bg:
+            # 无 Pillow：回退固定尺寸。模式切换（加班/结束）仍需换预生成背景并重绘，
+            # 否则压榨画布不渲染、主视图数字冻结（itemconfigure 缺失 tag 静默 no-op）
+            self._reload_fallback_bg(
+                "exploit" if self.overtime_start is not None else None)
+            self._rerender()
+            self._update_display(datetime.now())
             return  # 无 Pillow：固定尺寸回退，不烘焙
         w = max(MIN_WIN_W, self.canvas.winfo_width()) if self.canvas.winfo_ismapped() \
             else self._win_w
@@ -442,9 +450,9 @@ class PayClockApp:
         self._rerender()
         self._update_display(datetime.now())
 
-    def _reload_fallback_bg(self) -> None:
-        """无 Pillow 回退：按主题重载预烘焙背景。"""
-        key = self._theme_key()
+    def _reload_fallback_bg(self, key: str | None = None) -> None:
+        """无 Pillow 回退：按主题（或 "exploit"）重载预烘焙背景。"""
+        key = key or self._theme_key()
         bg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "assets", f"bg_{key}.png")
         if os.path.exists(bg_path):

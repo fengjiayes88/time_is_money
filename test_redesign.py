@@ -119,9 +119,65 @@ def check_tags_contract():
     print("tags contract OK")
 
 
+def check_config_validation():
+    """config 信任边界：NaN 月薪与非当前模式 leaves 非法数据必须触发整表重置。"""
+    import app
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, "config.json")
+
+        def write(mutate):
+            data = json.loads(json.dumps(app.DEFAULT_CONFIG))
+            mutate(data)
+            with open(p, "w", encoding="utf-8") as fh:
+                json.dump(data, fh)  # allow_nan 默认 True：可落盘 NaN 字面量
+
+        def bad_other_mode(data):
+            data["holiday_mode"] = "free"
+            data["leaves"] = {"weekend": {"2026-9-8": "调休"}, "free": {}}
+
+        def bad_other_mode_value(data):
+            data["holiday_mode"] = "free"
+            data["leaves"] = {"weekend": {"2026-09-08": "病假"}, "free": {}}
+
+        for name, mutate in (("NaN 月薪", lambda d: d.update(monthly_salary=float("nan"))),
+                             ("异模式非法键", bad_other_mode),
+                             ("异模式非法值", bad_other_mode_value)):
+            write(mutate)
+            cfg, warn = app.load_config(p)
+            assert warn, f"{name} 应触发整表重置"
+    print("config validation OK")
+
+
+def check_no_pillow_exploit():
+    """无 Pillow 回退：接受加班必须切压榨画布（ex_amount + 结束按钮），
+    结束加班回到主画布；全程不依赖运行时烘焙。"""
+    from datetime import datetime
+    import tkinter as tk
+    import app
+    app._pillow_available = lambda: False
+    app.save_config = lambda cfg: True
+    app.winsound.PlaySound = lambda *a, **k: None
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        appv = app.PayClockApp(root)
+        appv._on_accept_overtime()
+        assert appv.overtime_start is not None
+        assert appv.canvas.find_withtag("ex_amount"), "无 Pillow 应渲染压榨画布"
+        assert appv._end_btn is not None, "结束加班按钮应存在"
+        appv._update_display(datetime.now())  # 加班分支更新不得异常/冻结
+        appv._on_end_overtime()
+        assert not appv.canvas.find_withtag("ex_amount"), "结束加班应回主画布"
+    finally:
+        root.destroy()
+    print("no-pillow exploit OK")
+
+
 if __name__ == "__main__":
     check_migration()
     check_theme_key()
+    check_config_validation()
     check_tags_contract()
+    check_no_pillow_exploit()
     check_bake()
     print("ALL OK")
