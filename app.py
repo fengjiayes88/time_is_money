@@ -69,7 +69,7 @@ OVERTIME_BAR_SECONDS = 4 * 3600
 
 
 def compute_layout(w: int, h: int) -> dict:
-    """按窗口尺寸比例计算全部绘制位置（比例取自 demo/direction_a.html 版式，
+    """按窗口尺寸比例计算全部绘制位置（比例沿用 v5 设计稿版式，
     并把日期行合并进标题行——系统标题栏已占用窗口顶端，画布内不再重复应用名）。"""
     m = max(14, int(w * 0.063))  # 左右边距（348 宽 ≈ 22px）
     span = w - 2 * m
