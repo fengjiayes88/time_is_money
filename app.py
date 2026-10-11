@@ -12,7 +12,10 @@
 - 休假两种模式：weekend=固定周末公休；free=周末照常上班。两种模式均可用
   设置日历或右键菜单「标记今天」按日标记调休/请假（调休重算秒薪，请假扣日薪）；
 - 上班开始/结束用 Spinbox 时间选择控件（只读+循环滚动），非手输框；
-- 单实例互斥体防多开。
+- 单实例互斥体防多开；
+- DPI 感知（SetProcessDpiAwareness）：125%/150% 系统缩放下按物理像素渲染，
+  不再被 DWM 位图拉伸发虚；窗口尺寸/圆角按 scale 放大，字号按逻辑宽度取 pt，
+  任意缩放下与 100% 的版式比例一致。
 
 约束沿袭：单窗口单线程，全部刷新由 root.after(1000) 单循环驱动（R1）；
 每 tick 用真实当前时刻重算（A10/R2）；tick 异常兜底（A11/R5）；公式一律调 money 纯函数；
@@ -53,6 +56,7 @@ DEFAULT_CONFIG = {
 
 CONFIG_FILENAME = "config.json"
 TICK_MS = 1000
+_TICK_ERROR = "刷新异常：数据可能停更，请检查设置或重启程序"
 
 # ---- 窗口与布局 ----
 DEFAULT_WIN_W, DEFAULT_WIN_H = 348, 452
@@ -229,6 +233,11 @@ class PayClockApp:
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
+        # DPI 感知后 Tk 坐标即物理像素；未感知时恒报 96 → scale=1（测试/兼容路径）
+        try:
+            self._scale = max(1.0, root.winfo_fpixels("1i") / 96.0)
+        except Exception:
+            self._scale = 1.0
         self.cfg, load_warning = load_config()
         self.configured = os.path.exists(config_path()) and not load_warning
         self.pss = 0.0                 # 当月秒薪（月度派生缓存）
@@ -239,14 +248,18 @@ class PayClockApp:
         self.settings_dialog = None    # 设置弹窗（同一时刻至多一个）
         self.canvas = None             # 主画布（全部实时内容绘在其上）
         self._end_btn = None           # 结束加班按钮引用（防 GC）
-        self._win_w = DEFAULT_WIN_W    # 当前布局尺寸（缩放时跟随更新）
-        self._win_h = DEFAULT_WIN_H
+        self._win_w = round(DEFAULT_WIN_W * self._scale)  # 当前布局尺寸（物理 px）
+        self._win_h = round(DEFAULT_WIN_H * self._scale)
+        self._min_w = round(MIN_WIN_W * self._scale)
+        self._min_h = round(MIN_WIN_H * self._scale)
+        self._tick_errored = False    # tick 异常标志（恢复后撤提示用）
         self._rgn_size = (0, 0)        # 已应用圆角区域对应的窗口尺寸
         self._fonts = None             # 字体缓存（键 = 窗口宽度）
         self._status_msg = None        # 状态行消息（占据日期行位置，自动清除）
         self._status_after = None      # 状态行自动清除定时器
         self._ctx_menu = None          # 右键菜单（主题切换后整体重建）
         self._today_menu = None        # 「标记今天」子菜单引用
+        self._unmark_idx = None        # 「取消标记」菜单项索引（避免魔法下标错位）
         self.theme_var = None          # 主题 radiobutton 绑定变量
         # 等宽字体探测（Consolas → Cascadia Mono → Courier New，按系统可用性回退）
         fams = set(tkfont.families(root))
@@ -269,12 +282,12 @@ class PayClockApp:
 
     def _build_ui(self) -> None:
         self.root.title("时间就是金钱 · 实时薪资钟")
-        self.root.geometry(f"{DEFAULT_WIN_W}x{DEFAULT_WIN_H}")
-        self.root.minsize(MIN_WIN_W, MIN_WIN_H)
+        self.root.geometry(f"{self._win_w}x{self._win_h}")
+        self.root.minsize(self._min_w, self._min_h)
         self.root.resizable(True, True)
 
-        self.canvas = tk.Canvas(self.root, width=DEFAULT_WIN_W,
-                                height=DEFAULT_WIN_H,
+        self.canvas = tk.Canvas(self.root, width=self._win_w,
+                                height=self._win_h,
                                 bg=self._ui()["bg0"],
                                 highlightthickness=0, bd=0)
         self.canvas.pack(fill="both", expand=True)
@@ -306,7 +319,8 @@ class PayClockApp:
             size = (wr.right - wr.left, wr.bottom - wr.top)
             if size == self._rgn_size:
                 return  # 尺寸没变，无需重设
-            rgn = gdi32.CreateRoundRectRgn(0, 0, size[0], size[1], 24, 24)
+            r = int(24 * self._scale)
+            rgn = gdi32.CreateRoundRectRgn(0, 0, size[0], size[1], r, r)
             user32.SetWindowRgn(hwnd, rgn, True)
             self._rgn_size = size
         except Exception:
@@ -372,14 +386,18 @@ class PayClockApp:
         return THEMES[self._theme_key()]
 
     def _make_fonts(self) -> dict:
-        """字号随窗口宽度缩放；数字用等宽字体（tabular，每秒跳动不抖宽）。"""
+        """字号随窗口宽度缩放；数字用等宽字体（tabular，每秒跳动不抖宽）。
+
+        字号单位是 pt（Tk 正数=磅，随 DPI 换算像素）：按逻辑宽度（物理÷scale）
+        取比例，任意缩放下与 100% 的版式比例一致。"""
         w = self._win_w
         if self._fonts is not None and self._fonts.get("_w") == w:
             return self._fonts
+        wl = round(w / self._scale)  # 逻辑宽度：字号比例基准（DPI 无关，先取整消除抖动）
         yahei = "Microsoft YaHei UI"
 
         def s(k: float, lo: int, hi: int) -> int:
-            return max(lo, min(int(w * k), hi))
+            return max(lo, min(int(wl * k), hi))
 
         f = {
             "date": (yahei, s(0.031, 9, 12)),
@@ -443,6 +461,7 @@ class PayClockApp:
         m_today.add_command(label="调休", command=lambda: self._mark_today("调休"))
         m_today.add_command(label="请假", command=lambda: self._mark_today("请假"))
         m_today.add_command(label="取消标记", command=self._unmark_today)
+        self._unmark_idx = m_today.index("end")  # 记录索引，菜单结构变化不错位
         menu.add_cascade(label="标记今天", menu=m_today)
         menu.add_separator()
         menu.add_command(label="设置…", command=self._open_settings)
@@ -458,11 +477,12 @@ class PayClockApp:
 
     def _update_today_state(self) -> None:
         """今天已标记 → 「取消标记」可用；未标记 → 禁用（调休/请假随时可点）。"""
-        if self._today_menu is None:
+        if self._today_menu is None or self._unmark_idx is None:
             return
         mode_leaves = self.cfg["leaves"].get(self.cfg["holiday_mode"], {})
         marked = datetime.now().date().isoformat() in mode_leaves
-        self._today_menu.entryconfig(2, state="normal" if marked else "disabled")
+        self._today_menu.entryconfig(self._unmark_idx,
+                                     state="normal" if marked else "disabled")
 
     # ---------------- 渲染（主视图 / 红色压榨视图共用骨架）----------------
 
@@ -500,15 +520,17 @@ class PayClockApp:
         c.create_text(lay["cd"], text="", font=f["cd"], fill=p["label_ink"],
                       tags="cd")
         if alert:
-            btn = tk.Button(c, text="结束加班", command=self._on_end_overtime,
-                            font=("Microsoft YaHei UI", max(10, f["cap"][1] + 1), "bold"),
-                            bd=0, relief="flat", cursor="hand2",
-                            bg="#241214", fg="#FF8585",
-                            activebackground="#38181B", activeforeground="#FF8585",
-                            highlightthickness=1, highlightbackground="#4A1F22",
-                            highlightcolor="#FF5252", padx=24, pady=6)
-            self._end_btn = btn  # 防 GC
-            c.create_window(lay["btn"], window=btn)
+            if self._end_btn is None or not self._end_btn.winfo_exists():
+                # 复用按钮：缩放期 _render 高频重建，canvas.delete 不销毁
+                # widget，每次新建会泄漏控件
+                self._end_btn = tk.Button(c, text="结束加班", command=self._on_end_overtime,
+                                          font=("Microsoft YaHei UI", max(10, f["cap"][1] + 1), "bold"),
+                                          bd=0, relief="flat", cursor="hand2",
+                                          bg="#241214", fg="#FF8585",
+                                          activebackground="#38181B", activeforeground="#FF8585",
+                                          highlightthickness=1, highlightbackground="#4A1F22",
+                                          highlightcolor="#FF5252", padx=24, pady=6)
+            c.create_window(lay["btn"], window=self._end_btn)
         # 进度条（主 = 今日进度；压榨 = 加班时长）+ 刻度
         c.create_rectangle(*lay["track"], fill=p["line"], outline=p["line"],
                            tags="track")
@@ -541,8 +563,8 @@ class PayClockApp:
 
     def _on_canvas_configure(self, event) -> None:
         self._apply_window_chrome()
-        w = max(MIN_WIN_W, event.width)
-        h = max(MIN_WIN_H, event.height)
+        w = max(self._min_w, event.width)
+        h = max(self._min_h, event.height)
         if (w, h) == (self._win_w, self._win_h):
             return
         self._win_w, self._win_h = w, h
@@ -776,7 +798,12 @@ class PayClockApp:
         leaves = {m: {k: v for k, v in self._leaves_draft.get(m, {}).items()
                       if isinstance(k, str) and k.startswith(prefix)}
                   for m in ("weekend", "free")}
-        errors = money.validate(salary, ws, we, leaves[mode], payday, mode)
+        # 两模式都校验：异模式 leaves 若把应出勤天数吃光，重启时 load_config
+        # 会整表重置（连月薪一起丢），必须在保存点拦下
+        errors: list[str] = []
+        for m in ("weekend", "free"):
+            errs = money.validate(salary, ws, we, leaves[m], payday, m)
+            errors += errs if m == mode else [f"（{MODE_LABELS[m]}）{e}" for e in errs]
         if errors:
             self._dlg_status.configure(text="保存失败：" + "；".join(errors))
             return
@@ -799,8 +826,16 @@ class PayClockApp:
     def _tick(self) -> None:
         try:
             self._tick_once()
+            if self._tick_errored:  # 恢复正常后撤下错误提示
+                self._tick_errored = False
+                self._clear_status()
         except Exception:
-            pass  # A11/R5：单次 tick 异常兜底，不终止刷新循环
+            self._tick_errored = True  # A11/R5：单次 tick 异常兜底，不终止刷新循环
+            try:
+                if self._status_msg != _TICK_ERROR:  # 持续异常可见（原为静默冻结）
+                    self._set_status(_TICK_ERROR, clear_ms=0)
+            except Exception:
+                pass
         self.root.after(TICK_MS, self._tick)
 
     def _tick_once(self) -> None:
@@ -1017,8 +1052,9 @@ class PayClockApp:
         yes.pack(side="left", padx=8)
         no.pack(side="left", padx=8)
         self.root.update_idletasks()
-        x = self.root.winfo_x() + max(0, (self.root.winfo_width() - 320) // 2)
-        y = self.root.winfo_y() + max(0, (self.root.winfo_height() - 180) // 3)
+        dlg.update_idletasks()
+        x = self.root.winfo_x() + max(0, (self.root.winfo_width() - dlg.winfo_reqwidth()) // 2)
+        y = self.root.winfo_y() + max(0, (self.root.winfo_height() - dlg.winfo_reqheight()) // 3)
         dlg.geometry(f"+{x}+{y}")
 
     def _close_ask_dialog(self) -> None:
@@ -1075,7 +1111,21 @@ def _acquire_single_instance_lock() -> bool:
         return True  # 检测失败不阻断使用
 
 
+def _enable_dpi_awareness() -> None:
+    """声明进程 DPI 感知：否则 125%/150% 系统缩放下窗口被 DWM 位图拉伸、
+    文字发虚。必须在创建任何 Tk 窗口前调用；失败静默（观感退回拉伸，
+    功能不受影响）。"""
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # 系统级 DPI 感知
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()  # 无 shcore 的旧系统回退
+        except Exception:
+            pass
+
+
 def main() -> None:
+    _enable_dpi_awareness()
     if not _acquire_single_instance_lock():
         root = tk.Tk()
         root.withdraw()
